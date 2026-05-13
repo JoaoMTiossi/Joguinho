@@ -50,7 +50,18 @@ const ang = (ax,ay,bx,by)=>Math.atan2(by-ay,bx-ax);
 // Input
 const keys = {};
 const mouse = { x:0, y:0, wx:0, wy:0, down:false, pressed:false };
-window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(['1','2','3','4','5','6','7','8','9'].includes(e.key)) game?.player?.switchWeapon(parseInt(e.key)-1); if(e.key===' '){ game?.player?.useSpecial(); e.preventDefault(); }});
+window.addEventListener('keydown', e=>{
+  keys[e.key.toLowerCase()] = true;
+  if(['1','2','3','4','5','6','7','8','9'].includes(e.key)){
+    if(game?.levelUpOpen){
+      const idx = parseInt(e.key) - 1;
+      if(idx < game.levelUpOptions.length) game.pickLevelUp(idx);
+    } else {
+      game?.player?.switchWeapon(parseInt(e.key)-1);
+    }
+  }
+  if(e.key === ' '){ game?.player?.useSpecial(); e.preventDefault(); }
+});
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 canvas.addEventListener('mousemove', e=>{ mouse.x = e.clientX; mouse.y = e.clientY; });
 canvas.addEventListener('mousedown', e=>{ mouse.down = true; mouse.pressed = true; });
@@ -206,6 +217,57 @@ class Obstacle {
   constructor(x,y,w,h,type='crate'){
     this.x=x;this.y=y;this.w=w;this.h=h;this.type=type;
     this.color = type==='crate' ? '#4a3728' : '#3a3a4a';
+    this.alive = true;
+    this.maxHp = type==='crate' ? 80 : Infinity;
+    this.hp = this.maxHp;
+    this.hitFlash = 0;
+  }
+  hit(dmg){
+    if(!isFinite(this.maxHp) || !this.alive) return;
+    this.hp -= dmg;
+    this.hitFlash = 0.1;
+    if(this.hp <= 0) this.destroy();
+  }
+  destroy(){
+    if(!this.alive) return;
+    this.alive = false;
+    const cx = this.x + this.w/2, cy = this.y + this.h/2;
+    // Crate fragment explosion
+    for(let i=0;i<25;i++){
+      const a = Math.random()*TAU;
+      const sp = rnd(80, 280);
+      game.particles.spawn({
+        x:cx+rnd(-this.w/2,this.w/2), y:cy+rnd(-this.h/2,this.h/2),
+        vx:Math.cos(a)*sp, vy:Math.sin(a)*sp,
+        life:rnd(0.4,0.8), size:rnd(3,6),
+        color: Math.random()<0.5?'#6a5040':'#4a3728', glow:false
+      });
+    }
+    // Damage radius (fragments)
+    const radius = 60, dmg = 18;
+    for(const e of game.enemies){
+      if(!e.alive) continue;
+      const d = dist(cx, cy, e.x, e.y);
+      if(d < radius) e.hurt(dmg*(1-d/radius), '#bb8855');
+    }
+    // Drop loot from crate
+    const r = Math.random();
+    if(r < 0.4){
+      for(let i=0;i<rndi(2,4);i++){
+        game.coins.push(new Coin(cx+rnd(-15,15), cy+rnd(-15,15), 1));
+      }
+    } else if(r < 0.6){
+      game.drops.push(new HealthDrop(cx, cy, 20));
+    } else if(r < 0.7){
+      game.drops.push(new WeaponDrop(cx, cy, rndi(1, NUM_SLOTS-1)));
+    } else {
+      // Just coins
+      game.coins.push(new Coin(cx, cy, 1));
+    }
+    game.camera.doShake(3);
+  }
+  update(dt){
+    if(this.hitFlash > 0) this.hitFlash -= dt;
   }
   draw(cam){
     const sx = this.x-cam.x, sy = this.y-cam.y;
@@ -214,7 +276,7 @@ class Obstacle {
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fillRect(sx+4, sy+4, this.w, this.h);
     // Body
-    ctx.fillStyle = this.color;
+    ctx.fillStyle = this.hitFlash>0 ? '#ffeebb' : this.color;
     ctx.fillRect(sx, sy, this.w, this.h);
     // Top highlight
     ctx.fillStyle = this.type==='crate' ? '#6a5040' : '#5a5a6a';
@@ -231,12 +293,315 @@ class Obstacle {
       ctx.moveTo(sx, sy+this.h/2); ctx.lineTo(sx+this.w, sy+this.h/2);
       ctx.moveTo(sx+this.w/2, sy); ctx.lineTo(sx+this.w/2, sy+this.h);
       ctx.stroke();
+      // Damage cracks
+      if(this.hp < this.maxHp*0.5){
+        ctx.strokeStyle = '#1a0f08';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(sx+5, sy+5); ctx.lineTo(sx+15, sy+12); ctx.lineTo(sx+8, sy+22);
+        ctx.moveTo(sx+this.w-5, sy+this.h-5); ctx.lineTo(sx+this.w-15, sy+this.h-15);
+        ctx.stroke();
+      }
+      // HP bar when damaged
+      if(this.hp < this.maxHp){
+        ctx.fillStyle = '#000';
+        ctx.fillRect(sx, sy-7, this.w, 4);
+        ctx.fillStyle = '#aa6633';
+        ctx.fillRect(sx+1, sy-6, (this.w-2)*(this.hp/this.maxHp), 2);
+      }
     }
   }
   collides(x,y,r){
+    if(!this.alive) return false;
     const cx = clamp(x, this.x, this.x+this.w);
     const cy = clamp(y, this.y, this.y+this.h);
     return dist2(x,y,cx,cy) < r*r;
+  }
+}
+
+// ============================================================
+// COINS / BARRELS / DANGER ZONES
+// ============================================================
+class Coin {
+  constructor(x, y, value=1){
+    this.x = x; this.y = y; this.value = value;
+    this.t = Math.random()*TAU;
+    this.alive = true;
+    this.vx = rnd(-80, 80);
+    this.vy = rnd(-180, -60);
+    this.gravity = 380;
+    this.bounce = 0;
+    this.life = 25;
+    this.attracted = false;
+  }
+  update(dt){
+    this.t += dt*8;
+    this.life -= dt;
+    if(this.life <= 0){ this.alive = false; return; }
+    const p = game.player;
+    const dToP = dist(this.x, this.y, p.x, p.y);
+    // Magnet effect
+    if(dToP < 110 || this.attracted){
+      this.attracted = true;
+      const a = ang(this.x, this.y, p.x, p.y);
+      const sp = clamp(380 - dToP*1.2, 180, 500);
+      this.vx = lerp(this.vx, Math.cos(a)*sp, 0.35);
+      this.vy = lerp(this.vy, Math.sin(a)*sp, 0.35);
+      this.gravity = 0;
+    } else {
+      this.vy += this.gravity*dt;
+      this.vx *= 0.96;
+    }
+    this.x += this.vx*dt;
+    this.y += this.vy*dt;
+    if(dToP < 22){
+      p.coins += this.value;
+      p.gainXP(2 * this.value);
+      spawnDamage(this.x, this.y-10, '+'+this.value, '#ffd700');
+      for(let i=0;i<5;i++){
+        const a = Math.random()*TAU;
+        game.particles.spawn({
+          x:this.x, y:this.y, vx:Math.cos(a)*120, vy:Math.sin(a)*120,
+          life:0.3, size:rnd(1,3), color:'#ffd700', glow:true
+        });
+      }
+      this.alive = false;
+    }
+  }
+  draw(cam){
+    const sx = this.x-cam.x, sy = this.y-cam.y;
+    if(sx<-20||sx>W+20||sy<-20||sy>H+20) return;
+    const flicker = Math.abs(Math.sin(this.t));
+    const blink = this.life < 5 ? (Math.sin(this.life*8)*0.5+0.5) : 1;
+    ctx.save();
+    ctx.globalAlpha = blink;
+    ctx.translate(sx, sy);
+    const scaleX = Math.cos(this.t)*0.6 + 0.4;
+    ctx.scale(Math.max(0.2, scaleX), 1);
+    ctx.shadowBlur = 8; ctx.shadowColor = '#ffd700';
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.arc(0, 0, 6, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath(); ctx.arc(-1, -1, 2, 0, TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = `rgba(255,255,200,${flicker*0.6})`;
+    ctx.fillRect(-1, -3, 2, 6);
+    ctx.restore();
+    if(this.value > 1){
+      ctx.font = 'bold 9px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#000';
+      ctx.fillText(this.value, sx+1, sy-9+1);
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText(this.value, sx, sy-9);
+      ctx.textAlign = 'left';
+    }
+  }
+}
+
+class Barrel {
+  constructor(x, y){
+    this.x = x; this.y = y; this.r = 18;
+    this.hp = 30; this.maxHp = 30;
+    this.alive = true;
+    this.hitFlash = 0;
+    this.fuse = 0; // 0 = stable, > 0 = about to explode (chain)
+    this.t = Math.random()*TAU;
+  }
+  hit(dmg){
+    if(!this.alive) return;
+    this.hp -= dmg;
+    this.hitFlash = 0.1;
+    if(this.hp <= 0 && this.fuse <= 0) this.fuse = 0.05;
+  }
+  update(dt){
+    if(!this.alive) return;
+    if(this.hitFlash > 0) this.hitFlash -= dt;
+    this.t += dt*8;
+    if(this.fuse > 0){
+      this.fuse -= dt;
+      if(this.fuse <= 0) this.explode();
+      // Sparks
+      if(Math.random() < 0.7){
+        game.particles.spawn({
+          x:this.x+rnd(-4,4), y:this.y-15, vx:rnd(-30,30), vy:rnd(-80,-40),
+          life:0.3, size:rnd(2,4), color:'#ffaa00', glow:true
+        });
+      }
+    }
+  }
+  explode(){
+    if(!this.alive) return;
+    this.alive = false;
+    game.explode(this.x, this.y, 110, 70);
+    // Chain detonate other barrels
+    for(const b of game.barrels){
+      if(b.alive && b !== this){
+        const d = dist(this.x, this.y, b.x, b.y);
+        if(d < 130 && b.fuse <= 0) b.fuse = 0.15;
+      }
+    }
+    // Crate damage nearby
+    for(const o of game.obstacles){
+      if(o.alive && o.type === 'crate'){
+        const cx = o.x + o.w/2, cy = o.y + o.h/2;
+        if(dist(this.x, this.y, cx, cy) < 110) o.hit(60);
+      }
+    }
+  }
+  collides(x, y, r){
+    if(!this.alive) return false;
+    return dist(x, y, this.x, this.y) < r + this.r;
+  }
+  draw(cam){
+    if(!this.alive) return;
+    const sx = this.x-cam.x, sy = this.y-cam.y;
+    if(sx<-50||sx>W+50||sy<-50||sy>H+50) return;
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath(); ctx.ellipse(sx, sy+18, 18, 6, 0, 0, TAU); ctx.fill();
+    // Body
+    let bodyColor = this.hitFlash>0 ? '#fff' : (this.fuse > 0 ? (Math.floor(this.t*4)%2 ? '#ff5500' : '#cc2200') : '#aa2222');
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(sx-15, sy-22, 30, 40);
+    // Bands
+    ctx.fillStyle = '#222';
+    ctx.fillRect(sx-15, sy-15, 30, 3);
+    ctx.fillRect(sx-15, sy+10, 30, 3);
+    // Top
+    ctx.fillStyle = '#3a0a0a';
+    ctx.fillRect(sx-15, sy-22, 30, 4);
+    // Border
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sx-15, sy-22, 30, 40);
+    // Skull/danger icon
+    ctx.fillStyle = '#000';
+    ctx.fillRect(sx-2, sy-6, 4, 8);
+    ctx.fillRect(sx-6, sy-2, 12, 4);
+    // HP bar
+    if(this.hp < this.maxHp){
+      ctx.fillStyle = '#000';
+      ctx.fillRect(sx-15, sy-30, 30, 4);
+      ctx.fillStyle = '#ff6666';
+      ctx.fillRect(sx-14, sy-29, 28*(this.hp/this.maxHp), 2);
+    }
+    if(this.fuse > 0){
+      ctx.shadowBlur = 15; ctx.shadowColor = '#ff8800';
+      ctx.strokeStyle = '#ff8800';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(sx, sy, 22+Math.sin(this.t*4)*4, 0, TAU); ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+  }
+}
+
+class DangerZone {
+  constructor(x, y, type='lava'){
+    this.x = x; this.y = y; this.r = rnd(60, 90);
+    this.type = type;
+    this.color = type === 'lava' ? '#ff4400' : '#88ff00';
+    this.color2 = type === 'lava' ? '#ffaa00' : '#ccff44';
+    this.dmg = type === 'lava' ? 6 : 4;
+    this.t = Math.random()*TAU;
+    this.alive = true;
+    // Loot in center
+    this.loot = null;
+    if(Math.random() < 0.7){
+      const r = Math.random();
+      if(r < 0.4) this.loot = { type:'health', amount:50 };
+      else if(r < 0.7) this.loot = { type:'weapon', idx: rndi(2, NUM_SLOTS-1) };
+      else this.loot = { type:'coins', amount:rndi(8,15) };
+    }
+    this.lootCollected = false;
+  }
+  update(dt){
+    this.t += dt*2;
+    // Damage entities
+    const p = game.player;
+    if(dist(p.x, p.y, this.x, this.y) < this.r){
+      p.hurt(this.dmg*dt*4);
+      if(Math.random() < 0.3){
+        game.particles.spawn({
+          x:p.x+rnd(-8,8), y:p.y, vx:rnd(-20,20), vy:rnd(-80,-30),
+          life:0.4, size:rnd(3,6), color:this.color2, glow:true
+        });
+      }
+    }
+    for(const e of game.enemies){
+      if(!e.alive) continue;
+      if(dist(e.x, e.y, this.x, this.y) < this.r){
+        e.hurt(this.dmg*dt*2, this.color2);
+      }
+    }
+    // Loot pickup
+    if(this.loot && !this.lootCollected){
+      if(dist(p.x, p.y, this.x, this.y) < 18){
+        if(this.loot.type === 'health'){
+          const heal = Math.round(p.maxHp*(this.loot.amount/100));
+          p.hp = Math.min(p.maxHp, p.hp + heal);
+          spawnDamage(p.x, p.y-30, '+'+heal+' HP', '#22ff44');
+        } else if(this.loot.type === 'weapon'){
+          game.drops.push(new WeaponDrop(this.x, this.y, this.loot.idx));
+        } else if(this.loot.type === 'coins'){
+          for(let i=0;i<this.loot.amount;i++){
+            game.coins.push(new Coin(this.x+rnd(-10,10), this.y+rnd(-10,10), 1));
+          }
+        }
+        this.lootCollected = true;
+        for(let i=0;i<20;i++){
+          const a = Math.random()*TAU;
+          game.particles.spawn({
+            x:this.x, y:this.y, vx:Math.cos(a)*200, vy:Math.sin(a)*200,
+            life:0.5, size:rnd(3,5), color:'#ffd700', glow:true
+          });
+        }
+      }
+    }
+  }
+  draw(cam){
+    const sx = this.x-cam.x, sy = this.y-cam.y;
+    if(sx<-this.r-20||sx>W+this.r+20||sy<-this.r-20||sy>H+this.r+20) return;
+    // Pool
+    const pulse = 1 + Math.sin(this.t)*0.05;
+    const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, this.r*pulse);
+    grad.addColorStop(0, this.color2);
+    grad.addColorStop(0.5, this.color);
+    grad.addColorStop(1, this.color + '00');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(sx, sy, this.r*pulse, 0, TAU); ctx.fill();
+    // Bubbles
+    for(let i=0;i<3;i++){
+      const a = this.t + i*TAU/3;
+      const r = (Math.sin(this.t*2 + i)*0.4 + 0.5) * this.r * 0.7;
+      ctx.fillStyle = this.color2;
+      ctx.beginPath(); ctx.arc(sx + Math.cos(a)*r, sy + Math.sin(a)*r, 4 + Math.sin(this.t*3+i)*2, 0, TAU); ctx.fill();
+    }
+    // Border ring
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 3;
+    ctx.shadowBlur = 12; ctx.shadowColor = this.color;
+    ctx.beginPath(); ctx.arc(sx, sy, this.r, 0, TAU); ctx.stroke();
+    ctx.shadowBlur = 0;
+    // Loot indicator (floating above center)
+    if(this.loot && !this.lootCollected){
+      const ly = sy - 4 + Math.sin(this.t*2)*4;
+      ctx.save();
+      ctx.shadowBlur = 14; ctx.shadowColor = '#ffd700';
+      if(this.loot.type === 'health'){
+        ctx.fillStyle = '#ff66bb';
+        ctx.fillRect(sx-3, ly-9, 6, 18);
+        ctx.fillRect(sx-9, ly-3, 18, 6);
+      } else if(this.loot.type === 'weapon'){
+        ctx.fillStyle = '#ffd700';
+        ctx.fillRect(sx-10, ly-3, 20, 6);
+      } else {
+        ctx.fillStyle = '#ffd700';
+        ctx.beginPath(); ctx.arc(sx, ly, 8, 0, TAU); ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
   }
 }
 
@@ -683,9 +1048,20 @@ class Projectile {
     this.life -= dt;
     if(this.life <= 0){ this.alive = false; if(this.weapon==='rocket'){ game.explode(this.x, this.y, 80, this.dmg); } }
     if(this.x<0||this.x>MAP_W||this.y<0||this.y>MAP_H){ this.alive = false; }
-    // Obstacle collision
+    // Obstacle collision (damages crates)
     for(const o of game.obstacles){
       if(o.collides(this.x, this.y, this.size)){
+        if(o.type === 'crate') o.hit(this.dmg);
+        if(this.weapon==='rocket') game.explode(this.x, this.y, 80, this.dmg);
+        else game.hitSpark(this.x, this.y, this.color);
+        this.alive = false;
+        return;
+      }
+    }
+    // Barrel collision (detonates them)
+    for(const b of game.barrels){
+      if(b.collides(this.x, this.y, this.size)){
+        b.hit(this.dmg);
         if(this.weapon==='rocket') game.explode(this.x, this.y, 80, this.dmg);
         else game.hitSpark(this.x, this.y, this.color);
         this.alive = false;
@@ -776,6 +1152,7 @@ class Enemy {
     const safePad = 30;
     let ax = 0, ay = 0;
     for(const o of game.obstacles){
+      if(!o.alive) continue;
       const cx = clamp(this.x, o.x, o.x+o.w);
       const cy = clamp(this.y, o.y, o.y+o.h);
       const d = dist(this.x, this.y, cx, cy);
@@ -790,6 +1167,19 @@ class Enemy {
         const ta = ra + this.tangentSign*Math.PI*0.5;
         ax += Math.cos(ta)*force*this.speed*1.0;
         ay += Math.sin(ta)*force*this.speed*1.0;
+      }
+    }
+    // Avoid barrels too
+    for(const b of game.barrels){
+      if(!b.alive) continue;
+      const d = dist(this.x, this.y, b.x, b.y);
+      const safeR = this.r + b.r + 20;
+      if(d < safeR){
+        const dd = Math.max(d, 0.5);
+        const ra = ang(b.x, b.y, this.x, this.y);
+        const force = (safeR - dd) / safeR;
+        ax += Math.cos(ra)*force*this.speed*2;
+        ay += Math.sin(ra)*force*this.speed*2;
       }
     }
     vx += ax; vy += ay;
@@ -818,6 +1208,14 @@ class Enemy {
     if(this.hp <= 0){
       this.alive = false;
       game.score += this.scoreVal;
+      // XP gain proportional to enemy value
+      game.player.gainXP(Math.max(5, Math.floor(this.scoreVal * 0.5)));
+      game.player.killCount++;
+      // Drop coins
+      const coinCount = Math.max(1, Math.floor((this.scoreVal/15) * game.player.coinMultiplier * rnd(0.7, 1.3)));
+      for(let i=0;i<Math.min(coinCount, 12);i++){
+        game.coins.push(new Coin(this.x+rnd(-8,8), this.y+rnd(-8,8), 1));
+      }
       this.onDeath();
       addBlood(this.x, this.y);
       // Death burst
@@ -851,6 +1249,7 @@ class Enemy {
     const stepX = this.vx*dt, stepY = this.vy*dt;
     this.x += stepX;
     for(const o of game.obstacles){
+      if(!o.alive) continue;
       if(o.collides(this.x, this.y, this.r)){
         if(stepX > 0) this.x = o.x - this.r - 0.1;
         else if(stepX < 0) this.x = o.x + o.w + this.r + 0.1;
@@ -858,9 +1257,20 @@ class Enemy {
     }
     this.y += stepY;
     for(const o of game.obstacles){
+      if(!o.alive) continue;
       if(o.collides(this.x, this.y, this.r)){
         if(stepY > 0) this.y = o.y - this.r - 0.1;
         else if(stepY < 0) this.y = o.y + o.h + this.r + 0.1;
+      }
+    }
+    // Barrel collision push-out
+    for(const b of game.barrels){
+      if(!b.alive) continue;
+      if(b.collides(this.x, this.y, this.r)){
+        const a = ang(b.x, b.y, this.x, this.y);
+        const overlap = b.r + this.r - dist(this.x, this.y, b.x, b.y);
+        this.x += Math.cos(a)*overlap;
+        this.y += Math.sin(a)*overlap;
       }
     }
     this.x = clamp(this.x, this.r, MAP_W-this.r);
@@ -983,26 +1393,74 @@ class Shooter extends Enemy {
     this.hp=this.maxHp=40; this.r=12; this.speed=50; this.dmg=10;
     this.scoreVal=25; this.color='#c8a800'; this.shootCD=0; this.recoil=0;
   }
+  hasLOS(){
+    const p = game.player;
+    const steps = 10;
+    for(let s=1;s<=steps;s++){
+      const t = s/steps;
+      const x = lerp(this.x, p.x, t);
+      const y = lerp(this.y, p.y, t);
+      for(const o of game.obstacles){
+        if(o.alive && o.collides(x, y, 4)) return false;
+      }
+    }
+    return true;
+  }
+  findCover(){
+    const p = game.player;
+    let best = null, bestScore = Infinity;
+    for(const o of game.obstacles){
+      if(!o.alive) continue;
+      const ox = o.x + o.w/2, oy = o.y + o.h/2;
+      // Position behind obstacle relative to player
+      const aFromPlayer = ang(p.x, p.y, ox, oy);
+      const coverDist = Math.max(o.w, o.h)/2 + this.r + 12;
+      const cx = ox + Math.cos(aFromPlayer)*coverDist;
+      const cy = oy + Math.sin(aFromPlayer)*coverDist;
+      const dToCover = dist(this.x, this.y, cx, cy);
+      const dPlayerToObst = dist(p.x, p.y, ox, oy);
+      // Prefer cover that's between us and player
+      if(dPlayerToObst > 100 && dToCover < 400){
+        const score = dToCover + Math.abs(dPlayerToObst - 250)*0.3;
+        if(score < bestScore){ bestScore = score; best = {x:cx, y:cy}; }
+      }
+    }
+    return best;
+  }
   ai(dt){
     const p = game.player;
     const d = dist(this.x,this.y,p.x,p.y);
     const a = ang(this.x, this.y, p.x, p.y);
-    let tvx, tvy;
-    if(d > 300){
-      tvx = Math.cos(a)*this.speed;
-      tvy = Math.sin(a)*this.speed;
-    } else if(d < 200){
-      tvx = -Math.cos(a)*this.speed;
-      tvy = -Math.sin(a)*this.speed;
+    const losClear = this.hasLOS();
+    let tvx = 0, tvy = 0;
+    if(!losClear){
+      // Try to step out to get a shot
+      tvx = Math.cos(a + Math.PI*0.5*this.tangentSign)*this.speed*0.7;
+      tvy = Math.sin(a + Math.PI*0.5*this.tangentSign)*this.speed*0.7;
+    } else if(d < 250){
+      // Too close — find cover
+      const cover = this.findCover();
+      if(cover){
+        const ca = ang(this.x, this.y, cover.x, cover.y);
+        tvx = Math.cos(ca)*this.speed;
+        tvy = Math.sin(ca)*this.speed;
+      } else {
+        tvx = -Math.cos(a)*this.speed;
+        tvy = -Math.sin(a)*this.speed;
+      }
+    } else if(d > 400){
+      tvx = Math.cos(a)*this.speed*0.6;
+      tvy = Math.sin(a)*this.speed*0.6;
     } else {
-      tvx = Math.cos(a + Math.PI*0.5*this.tangentSign)*this.speed*0.5;
-      tvy = Math.sin(a + Math.PI*0.5*this.tangentSign)*this.speed*0.5;
+      // Strafe at good distance
+      tvx = Math.cos(a + Math.PI*0.5*this.tangentSign)*this.speed*0.4;
+      tvy = Math.sin(a + Math.PI*0.5*this.tangentSign)*this.speed*0.4;
     }
     [tvx, tvy] = this.applyAvoidance(tvx, tvy);
     this.vx = lerp(this.vx, tvx, 0.2);
     this.vy = lerp(this.vy, tvy, 0.2);
-    if(this.shootCD <= 0 && d < 500){
-      this.shootCD = 1.8;
+    if(this.shootCD <= 0 && d < 550 && losClear){
+      this.shootCD = 1.6;
       this.recoil = 0.2;
       game.spawnEnemyProjectile(this.x+Math.cos(a)*16, this.y+Math.sin(a)*16, Math.cos(a)*450, Math.sin(a)*450, this.dmg, '#c8a800');
     } else this.shootCD -= dt;
@@ -1098,7 +1556,31 @@ class Ghost extends Enemy {
     this.trail = [];
   }
   ai(dt){
-    super.ai(dt);
+    const p = game.player;
+    const d = dist(this.x, this.y, p.x, p.y);
+    // Flank: approach from perpendicular to player's aim direction
+    if(d > 80){
+      const playerFacing = p.aimAng;
+      const flankSide = playerFacing + Math.PI*0.5*this.tangentSign;
+      const targetDist = 70;
+      const tx = p.x + Math.cos(playerFacing + Math.PI)*30 + Math.cos(flankSide)*targetDist;
+      const ty = p.y + Math.sin(playerFacing + Math.PI)*30 + Math.sin(flankSide)*targetDist;
+      const a = ang(this.x, this.y, tx, ty);
+      let tvx = Math.cos(a)*this.speed;
+      let tvy = Math.sin(a)*this.speed;
+      [tvx, tvy] = this.applyAvoidance(tvx, tvy);
+      this.vx = lerp(this.vx, tvx, 0.18);
+      this.vy = lerp(this.vy, tvy, 0.18);
+    } else {
+      // Close enough: dive in
+      const a = ang(this.x, this.y, p.x, p.y);
+      this.vx = Math.cos(a)*this.speed*1.2;
+      this.vy = Math.sin(a)*this.speed*1.2;
+    }
+    if(d < this.r + p.r && this.attackCD <= 0){
+      p.hurt(this.dmg);
+      this.attackCD = 1;
+    }
     this.flick += dt*3;
     this.trail.push({x:this.x,y:this.y,t:0.3});
     if(this.trail.length > 8) this.trail.shift();
@@ -1193,6 +1675,185 @@ class Swarm extends Enemy {
     ctx.fillStyle = this.hitFlash>0?'#fff':'#e040a0';
     ctx.beginPath(); ctx.ellipse(0,0,6,4,0,0,TAU); ctx.fill();
     ctx.restore();
+  }
+}
+
+// ============================================================
+// MINI-BOSSES (surprise spawns)
+// ============================================================
+class MiniBossAssassin extends Enemy {
+  constructor(x, y){
+    super(x, y);
+    this.hp = this.maxHp = 220;
+    this.r = 16; this.speed = 200; this.dmg = 28;
+    this.scoreVal = 250; this.color = '#330033';
+    this.alphaBase = 0.15;
+    this.revealT = 0;
+    this.dashT = 0;
+    this.dashing = false;
+  }
+  hurt(d, color){
+    this.revealT = 1.2;
+    super.hurt(d, color);
+  }
+  ai(dt){
+    const p = game.player;
+    const d = dist(this.x, this.y, p.x, p.y);
+    const a = ang(this.x, this.y, p.x, p.y);
+    if(this.revealT > 0) this.revealT -= dt;
+    this.dashT -= dt;
+    if(this.dashing){
+      this.vx = Math.cos(a)*this.speed*2.5;
+      this.vy = Math.sin(a)*this.speed*2.5;
+      if(this.dashT <= 0){ this.dashing = false; this.dashT = rnd(2.5, 4); }
+    } else if(this.dashT <= 0 && d < 350){
+      this.dashing = true;
+      this.dashT = 0.4;
+      this.revealT = 0.5;
+    } else {
+      let tvx = Math.cos(a)*this.speed*0.7;
+      let tvy = Math.sin(a)*this.speed*0.7;
+      [tvx, tvy] = this.applyAvoidance(tvx, tvy);
+      this.vx = lerp(this.vx, tvx, 0.18);
+      this.vy = lerp(this.vy, tvy, 0.18);
+    }
+    if(d < this.r + p.r && this.attackCD <= 0){
+      p.hurt(this.dmg);
+      this.attackCD = 0.7;
+    }
+  }
+  draw(cam){
+    const sx = this.x-cam.x, sy = this.y-cam.y;
+    const closeAlpha = clamp(1 - dist(this.x,this.y,game.player.x,game.player.y)/180, 0, 1);
+    const baseAlpha = Math.max(this.alphaBase + closeAlpha*0.3, this.dashing ? 0.6 : 0);
+    const alpha = this.revealT > 0 ? Math.min(1, baseAlpha + this.revealT) : baseAlpha;
+    ctx.save();
+    ctx.globalAlpha = clamp(alpha, 0, 1);
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.ellipse(sx, sy+12, 14, 5, 0, 0, TAU); ctx.fill();
+    const a = ang(this.x, this.y, game.player.x, game.player.y);
+    ctx.translate(sx, sy);
+    ctx.rotate(a);
+    // Cloak
+    ctx.fillStyle = this.hitFlash>0?'#ff6666':'#1a001a';
+    ctx.beginPath(); ctx.ellipse(0, 0, 14, 11, 0, 0, TAU); ctx.fill();
+    // Hood
+    ctx.fillStyle = '#0a000a';
+    ctx.beginPath();
+    ctx.moveTo(-5,-9); ctx.lineTo(8,0); ctx.lineTo(-5,9); ctx.closePath();
+    ctx.fill();
+    // Daggers
+    ctx.strokeStyle = '#cc0066'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(8,-6); ctx.lineTo(20,-9);
+    ctx.moveTo(8,6); ctx.lineTo(20,9);
+    ctx.stroke();
+    // Glowing eyes
+    ctx.shadowBlur = 8; ctx.shadowColor = '#ff0066';
+    ctx.fillStyle = '#ff0066';
+    ctx.beginPath(); ctx.arc(4,-3,1.5,0,TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(4,3,1.5,0,TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    if(this.revealT > 0 || closeAlpha > 0.3) this.drawHPBar(cam, 50, true);
+    // Dash trail
+    if(this.dashing){
+      for(let i=0;i<3;i++){
+        game.particles.spawn({
+          x:this.x, y:this.y, vx:rnd(-30,30), vy:rnd(-30,30),
+          life:0.3, size:rnd(4,8), color:'#660066', glow:true
+        });
+      }
+    }
+  }
+}
+
+class MiniBossGiantExploder extends Enemy {
+  constructor(x, y){
+    super(x, y);
+    this.hp = this.maxHp = 600;
+    this.r = 44; this.speed = 50; this.dmg = 50;
+    this.scoreVal = 350; this.color = '#ff4400';
+    this.pulse = 0;
+    this.sparkles = 0;
+  }
+  ai(dt){
+    const p = game.player;
+    const d = dist(this.x, this.y, p.x, p.y);
+    const a = ang(this.x, this.y, p.x, p.y);
+    let tvx = Math.cos(a)*this.speed;
+    let tvy = Math.sin(a)*this.speed;
+    [tvx, tvy] = this.applyAvoidance(tvx, tvy);
+    this.vx = lerp(this.vx, tvx, 0.1);
+    this.vy = lerp(this.vy, tvy, 0.1);
+    this.pulse += dt * (d < 100 ? 16 : 8);
+    this.sparkles += dt;
+    if(this.sparkles > 0.05){
+      this.sparkles = 0;
+      const ang2 = Math.random()*TAU;
+      game.particles.spawn({
+        x:this.x+Math.cos(ang2)*this.r, y:this.y+Math.sin(ang2)*this.r,
+        vx:Math.cos(ang2)*60, vy:Math.sin(ang2)*60-30,
+        life:0.5, size:rnd(4,8), color:Math.random()<0.5?'#ff4400':'#ffaa00', glow:true
+      });
+    }
+    if(d < 50 && this.attackCD <= 0){
+      // Mega explosion
+      game.explode(this.x, this.y, 200, this.dmg*1.5);
+      this.hp = 0;
+      this.alive = false;
+      game.score += this.scoreVal;
+      addBlood(this.x, this.y, '#5a2000');
+      // Drop juicy loot
+      for(let i=0;i<8;i++){
+        game.coins.push(new Coin(this.x+rnd(-30,30), this.y+rnd(-30,30), 1));
+      }
+      game.drops.push(new HealthDrop(this.x, this.y, 50));
+    }
+  }
+  draw(cam){
+    const sx = this.x-cam.x, sy = this.y-cam.y;
+    this.drawShadow(cam);
+    const scale = 1 + Math.sin(this.pulse)*0.12;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.scale(scale, scale);
+    // Outer aura
+    const grad = ctx.createRadialGradient(0,0,this.r*0.3,0,0,this.r*1.5);
+    grad.addColorStop(0, 'rgba(255,170,0,0.5)');
+    grad.addColorStop(1, 'rgba(255,68,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(0,0,this.r*1.5,0,TAU); ctx.fill();
+    // Spikes
+    for(let i=0;i<8;i++){
+      const a = this.pulse*0.5 + i*TAU/8;
+      ctx.strokeStyle = '#ffaa00';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*(this.r-4), Math.sin(a)*(this.r-4));
+      ctx.lineTo(Math.cos(a)*(this.r+12), Math.sin(a)*(this.r+12));
+      ctx.stroke();
+    }
+    // Body
+    ctx.shadowBlur = 18 + Math.sin(this.pulse)*8;
+    ctx.shadowColor = '#ff4400';
+    ctx.fillStyle = this.hitFlash>0?'#fff':'#cc3300';
+    ctx.beginPath(); ctx.arc(0,0,this.r,0,TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Cracks
+    ctx.strokeStyle = '#ffaa00';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-25,-15); ctx.lineTo(-5,5); ctx.lineTo(-15,25);
+    ctx.moveTo(20,-25); ctx.lineTo(8,-5); ctx.lineTo(25,15);
+    ctx.stroke();
+    // Skull
+    ctx.fillStyle = '#000';
+    ctx.fillRect(-3,-15,6,28);
+    ctx.fillRect(-15,-3,30,6);
+    ctx.restore();
+    this.drawHPBar(cam, 80, true);
   }
 }
 
@@ -1317,9 +1978,10 @@ class WeaponDrop {
     this.t += dt;
     if(dist(this.x, this.y, game.player.x, game.player.y) < 28){
       const idx = this.idx;
-      const existing = game.player.weapons[idx];
+      let existing = game.player.weapons[idx];
       if(!existing){
         game.player.weapons[idx] = new WEAPON_CLASSES[idx]();
+        existing = game.player.weapons[idx];
         game.player.switchWeapon(idx);
         spawnDamage(game.player.x, game.player.y - game.player.r - 10, this.name.toUpperCase(), this.color);
       } else {
@@ -1332,12 +1994,32 @@ class WeaponDrop {
           spawnDamage(game.player.x, game.player.y - game.player.r - 10, '+'+gained+' ammo', this.color);
         }
       }
+      // Track pickup count for golden upgrade
+      game.weaponDropCounts[idx] = (game.weaponDropCounts[idx] || 0) + 1;
+      const count = game.weaponDropCounts[idx];
+      if(count >= 3 && !existing.golden){
+        existing.golden = true;
+        existing.damage = (existing.damage || 10) * 1.5;
+        existing.fireRate = (existing.fireRate || 0.3) * 0.7;
+        existing.color = '#ffd700';
+        existing.name = '★ ' + existing.name;
+        spawnDamage(game.player.x, game.player.y - 50, '★ DOURADA!', '#ffd700');
+        game.camera.doShake(6);
+        game.flashScreen = 0.15;
+        for(let i=0;i<25;i++){
+          const a = Math.random()*TAU;
+          game.particles.spawn({
+            x:game.player.x, y:game.player.y, vx:Math.cos(a)*rnd(150,300), vy:Math.sin(a)*rnd(150,300),
+            life:0.8, size:rnd(3,6), color:'#ffd700', glow:true
+          });
+        }
+      }
       // Pickup particles
       for(let i=0;i<10;i++){
         const a = Math.random()*TAU;
         game.particles.spawn({
           x:this.x, y:this.y, vx:Math.cos(a)*120, vy:Math.sin(a)*120,
-          life:0.5, size:rnd(2,4), color:this.color, glow:true
+          life:0.5, size:rnd(2,4), color:existing.color, glow:true
         });
       }
       this.alive = false;
@@ -1411,7 +2093,7 @@ class HealthDrop {
   update(dt){
     this.t += dt;
     if(dist(this.x, this.y, game.player.x, game.player.y) < 28){
-      const heal = Math.round(game.player.maxHp * (this.amount/100));
+      const heal = Math.round(game.player.maxHp * (this.amount/100) * game.player.healMultiplier);
       const before = game.player.hp;
       game.player.hp = Math.min(game.player.maxHp, game.player.hp + heal);
       const gained = Math.round(game.player.hp - before);
@@ -1486,7 +2168,12 @@ class Player {
     this.aimAng = 0;
     this.walkT = 0;
     this.invuln = 0;
-    this.dashCD = 0;
+    // Dash stamina (3 charges, individual regen)
+    this.dashCharges = 3;
+    this.dashChargesMax = 3;
+    this.dashRegenT = 0;
+    this.dashRegenTime = 1.5;
+    this.shiftHeldFromLast = false;
     this.dash = null;
     this.swing = null;
     this.spin360 = 0; this.spin360Rot = 0;
@@ -1497,6 +2184,16 @@ class Player {
     this.sniperCharge = 0;
     this.punchAnim = null;
     this.shockwave = null;
+    // XP / Level / Coins
+    this.xp = 0;
+    this.level = 1;
+    this.xpToNext = 80;
+    this.coins = 0;
+    this.damageMultiplier = 1;
+    this.healMultiplier = 1;
+    this.critChance = 0.05;
+    this.coinMultiplier = 1;
+    this.killCount = 0;
   }
   get weapon(){ return this.weapons[this.weaponIdx]; }
   switchWeapon(idx){
@@ -1526,26 +2223,76 @@ class Player {
   useSpecial(){
     this.weapon?.special(this);
   }
+  gainXP(amount){
+    this.xp += amount;
+    while(this.xp >= this.xpToNext){
+      this.xp -= this.xpToNext;
+      this.level++;
+      this.xpToNext = Math.floor(this.xpToNext * 1.35);
+      this.triggerLevelUp();
+    }
+  }
+  rollDamage(base){
+    const crit = Math.random() < this.critChance;
+    return { dmg: base * this.damageMultiplier * (crit ? 2 : 1), crit };
+  }
+  triggerLevelUp(){
+    // Heal a bit and shake
+    this.hp = Math.min(this.maxHp, this.hp + this.maxHp*0.15);
+    game.camera.doShake(4);
+    game.flashScreen = 0.1;
+    // Generate 3 unique upgrades
+    const pool = [
+      { label:'+15% Velocidade', desc:'Mover-se mais rápido', color:'#88ff88', apply: p => p.speed *= 1.15 },
+      { label:'+30 HP Máximo', desc:'Mais vida total', color:'#ff6666', apply: p => { p.maxHp += 30; p.hp = Math.min(p.maxHp, p.hp + 30); } },
+      { label:'+20% Dano', desc:'Todas as armas', color:'#ff8800', apply: p => p.damageMultiplier *= 1.2 },
+      { label:'-25% CD Especial', desc:'Especiais mais rápidos', color:'#ffd700', apply: p => { for(const w of p.weapons) if(w) w.specialCD *= 0.75; } },
+      { label:'+1 Carga de Dash', desc:'Mais mobilidade', color:'#88aaff', apply: p => { if(p.dashChargesMax<6){p.dashChargesMax++; p.dashCharges = Math.min(p.dashChargesMax, p.dashCharges+1);} } },
+      { label:'Crítico +15%', desc:'Mais chance de 2× dano', color:'#ffff44', apply: p => p.critChance = Math.min(0.7, p.critChance + 0.15) },
+      { label:'+50% Munição Máx', desc:'Comporta mais balas', color:'#aaccff', apply: p => { for(const w of p.weapons) if(w && !w.unlimited){ w.maxAmmo = Math.floor(w.maxAmmo*1.5); w.ammo = Math.min(w.maxAmmo, w.ammo + Math.floor(w.maxAmmo*0.3)); } } },
+      { label:'+50% Cura', desc:'Drops curam mais', color:'#22ff44', apply: p => p.healMultiplier *= 1.5 },
+      { label:'+50% Moedas', desc:'Mais ouro de inimigos', color:'#ffcc00', apply: p => p.coinMultiplier *= 1.5 },
+      { label:'Recarga Total', desc:'Munição cheia agora', color:'#44ddff', apply: p => { for(const w of p.weapons) if(w && !w.unlimited) w.ammo = w.maxAmmo; } },
+      { label:'Cura Completa', desc:'HP 100% agora', color:'#ff44aa', apply: p => p.hp = p.maxHp },
+    ];
+    const picked = [];
+    while(picked.length < 3 && pool.length > 0){
+      const idx = Math.floor(Math.random()*pool.length);
+      picked.push(pool.splice(idx,1)[0]);
+    }
+    game.levelUpOptions = picked;
+    game.levelUpOpen = true;
+  }
   update(dt){
     this.aimAng = ang(this.x, this.y, mouse.wx, mouse.wy);
     if(this.invuln > 0) this.invuln -= dt;
-    if(this.dashCD > 0) this.dashCD -= dt;
+    // Dash regen
+    if(this.dashCharges < this.dashChargesMax){
+      this.dashRegenT -= dt;
+      if(this.dashRegenT <= 0){
+        this.dashCharges++;
+        this.dashRegenT = this.dashRegenTime;
+      }
+    }
 
-    // Dash from shift
-    if(keys['shift'] && this.dashCD <= 0){
+    // Dash from shift (use 1 charge per press)
+    const shiftNow = !!keys['shift'];
+    if(shiftNow && !this.shiftHeldFromLast && this.dashCharges > 0){
       const ix = (keys['d']?1:0) - (keys['a']?1:0);
       const iy = (keys['s']?1:0) - (keys['w']?1:0);
       if(ix !== 0 || iy !== 0){
         const a = Math.atan2(iy, ix);
-        this.x += Math.cos(a)*80;
-        this.y += Math.sin(a)*80;
-        this.dashCD = 1.5;
-        this.invuln = 0.2;
-        for(let i=0;i<10;i++){
-          game.particles.spawn({ x:this.x, y:this.y, vx:rnd(-100,100), vy:rnd(-100,100), life:0.4, size:rnd(2,4), color:'#fff', glow:true });
+        this.x += Math.cos(a)*90;
+        this.y += Math.sin(a)*90;
+        this.dashCharges--;
+        if(this.dashRegenT <= 0) this.dashRegenT = this.dashRegenTime;
+        this.invuln = 0.25;
+        for(let i=0;i<12;i++){
+          game.particles.spawn({ x:this.x, y:this.y, vx:rnd(-100,100), vy:rnd(-100,100), life:0.4, size:rnd(2,4), color:'#88ccff', glow:true });
         }
       }
     }
+    this.shiftHeldFromLast = shiftNow;
 
     // Movement
     let ix = (keys['d']?1:0) - (keys['a']?1:0);
@@ -1578,12 +2325,23 @@ class Player {
 
     // Obstacle collision
     for(const o of game.obstacles){
+      if(!o.alive) continue;
       if(o.collides(this.x, this.y, this.r)){
         const cx = clamp(this.x, o.x, o.x+o.w);
         const cy = clamp(this.y, o.y, o.y+o.h);
         const a = ang(cx, cy, this.x, this.y);
         this.x = cx + Math.cos(a)*this.r;
         this.y = cy + Math.sin(a)*this.r;
+      }
+    }
+    // Barrel collision
+    for(const b of game.barrels){
+      if(!b.alive) continue;
+      if(b.collides(this.x, this.y, this.r)){
+        const a = ang(b.x, b.y, this.x, this.y);
+        const overlap = b.r + this.r - dist(this.x, this.y, b.x, b.y);
+        this.x += Math.cos(a)*overlap;
+        this.y += Math.sin(a)*overlap;
       }
     }
     this.x = clamp(this.x, this.r, MAP_W-this.r);
@@ -1936,39 +2694,101 @@ class Game {
     this.enemies = [];
     this.obstacles = [];
     this.drops = [];
+    this.coins = [];
+    this.barrels = [];
+    this.dangerZones = [];
+    this.weaponDropCounts = {};
     this.wave = 0;
     this.waveT = 0;
-    this.waveState = 'starting'; // starting, active, complete
+    this.waveState = 'starting';
     this.waveTextT = 0;
     this.waveText = '';
+    this.eventWave = null;
     this.score = 0;
     this.gameOverState = false;
     this.flashScreen = 0;
+    // Shop
+    this.shopOpen = false;
+    this.shopItems = [];
+    // Level-up
+    this.levelUpOpen = false;
+    this.levelUpOptions = [];
+    // UI hover/click cache (computed in drawHUD)
+    this.uiClickAreas = [];
+    // Slow-mo on wave clear
+    this.slowMo = 0;
     this.generateMap();
     this.startWave(1);
   }
   generateMap(){
-    // Random obstacles around the map
-    for(let i=0;i<40;i++){
+    this.obstacles = [];
+    this.barrels = [];
+    this.dangerZones = [];
+    const safeFromCenter = (x,y) => dist(x, y, MAP_W/2, MAP_H/2) > 200;
+    // Obstacles
+    for(let i=0;i<45;i++){
       let x, y, tries=0;
       do {
         x = rnd(100, MAP_W-100); y = rnd(100, MAP_H-100);
         tries++;
-      } while(dist(x,y,MAP_W/2,MAP_H/2) < 200 && tries < 20);
+      } while(!safeFromCenter(x,y) && tries < 20);
       const w = rnd(40,90), h = rnd(40,90);
-      this.obstacles.push(new Obstacle(x,y,w,h, Math.random()<0.5?'crate':'wall'));
+      this.obstacles.push(new Obstacle(x,y,w,h, Math.random()<0.55?'crate':'wall'));
+    }
+    // Explosive barrels scattered
+    for(let i=0;i<14;i++){
+      let x, y, tries=0;
+      do {
+        x = rnd(200, MAP_W-200); y = rnd(200, MAP_H-200);
+        tries++;
+      } while(!safeFromCenter(x,y) && tries < 20);
+      // Avoid overlap with obstacles
+      let bad = false;
+      for(const o of this.obstacles){
+        if(x>=o.x-30 && x<=o.x+o.w+30 && y>=o.y-30 && y<=o.y+o.h+30){ bad = true; break; }
+      }
+      if(!bad) this.barrels.push(new Barrel(x, y));
+    }
+    // Danger zones
+    for(let i=0;i<6;i++){
+      let x, y, tries=0;
+      do {
+        x = rnd(250, MAP_W-250); y = rnd(250, MAP_H-250);
+        tries++;
+      } while(dist(x,y,MAP_W/2,MAP_H/2) < 350 && tries < 20);
+      let bad = false;
+      for(const o of this.obstacles){
+        if(x>=o.x-60 && x<=o.x+o.w+60 && y>=o.y-60 && y<=o.y+o.h+60){ bad = true; break; }
+      }
+      if(!bad) this.dangerZones.push(new DangerZone(x, y, Math.random()<0.5?'lava':'acid'));
     }
   }
   startWave(n){
     this.wave = n;
     this.waveState = 'active';
     this.enemies = [];
-    let cz=0, cs=0, ct=0, cx=0, cg=0, csw=0, cb=0;
-    if(n === 1){ cz = 5; }
+    this.eventWave = null;
+    // Mini-boss every 3 waves (skip boss waves)
+    const isBossWave = n % 5 === 0;
+    const isMiniBossWave = n > 3 && n % 3 === 0 && !isBossWave;
+    // Event wave types (also non-boss)
+    const isEventWave = !isBossWave && !isMiniBossWave && n > 4 && n % 4 === 0;
+    let cz=0, cs=0, ct=0, cx=0, cg=0, csw=0, cb=0, miniBoss=null;
+    if(isEventWave){
+      const events = ['horda', 'tanques', 'escuridao'];
+      this.eventWave = events[Math.floor((n-4)/4) % events.length];
+      if(this.eventWave === 'horda'){ csw = 50; cz = 8; }
+      else if(this.eventWave === 'tanques'){ ct = Math.min(8, 3 + Math.floor(n/6)); cz = 4; }
+      else if(this.eventWave === 'escuridao'){
+        const base = Math.floor(n*1.2);
+        cz = base; cg = Math.floor(base*0.6); cx = 3;
+      }
+    } else if(isBossWave){
+      cb = 1; csw = 8; cz = 5;
+    } else if(n === 1){ cz = 5; }
     else if(n === 2){ cz = 10; }
     else if(n === 3){ cz = 10; cs = 3; }
     else if(n === 4){ cz = 12; cs = 5; ct = 1; cx = 2; }
-    else if(n % 5 === 0){ cb = 1; csw = 8; cz = 5; }
     else {
       const base = Math.floor(n*1.5);
       cz = base + 4;
@@ -1977,6 +2797,9 @@ class Game {
       cx = Math.floor(base*0.25);
       cg = Math.floor(base*0.2);
       csw = Math.floor(base*0.3);
+    }
+    if(isMiniBossWave){
+      miniBoss = (Math.floor(n/3) % 2 === 0) ? MiniBossAssassin : MiniBossGiantExploder;
     }
     const spawn = (cls, count) => {
       for(let i=0;i<count;i++){
@@ -2004,8 +2827,41 @@ class Game {
       const y = this.player.y + Math.sin(a)*700;
       this.enemies.push(new Boss(clamp(x,80,MAP_W-80), clamp(y,80,MAP_H-80), Math.floor(n/5)));
     }
-    this.waveText = `ONDA ${n}`;
-    this.waveTextT = 2;
+    if(miniBoss){
+      const a = Math.random()*TAU;
+      const x = clamp(this.player.x + Math.cos(a)*600, 100, MAP_W-100);
+      const y = clamp(this.player.y + Math.sin(a)*600, 100, MAP_H-100);
+      this.enemies.push(new miniBoss(x, y));
+      this.waveText = '⚠ MINI-BOSS!';
+      this.waveTextT = 3;
+      this.flashScreen = 0.2;
+      this.camera.doShake(8);
+    } else if(this.eventWave){
+      const titles = { horda:'⚡ HORDA RÁPIDA!', tanques:'⚙ INVASÃO DE TANQUES!', escuridao:'☾ ESCURIDÃO!' };
+      this.waveText = titles[this.eventWave];
+      this.waveTextT = 3;
+      this.flashScreen = 0.15;
+    } else {
+      this.waveText = `ONDA ${n}`;
+      this.waveTextT = 2;
+    }
+    // Re-spawn destroyed barrels (some)
+    let aliveBarrels = this.barrels.filter(b => b.alive).length;
+    while(aliveBarrels < 14){
+      let x, y, tries=0, bad=true;
+      while(bad && tries < 20){
+        x = rnd(200, MAP_W-200); y = rnd(200, MAP_H-200);
+        bad = dist(x,y,this.player.x,this.player.y) < 250;
+        if(!bad){
+          for(const o of this.obstacles){
+            if(o.alive && x>=o.x-30 && x<=o.x+o.w+30 && y>=o.y-30 && y<=o.y+o.h+30){ bad = true; break; }
+          }
+        }
+        tries++;
+      }
+      if(!bad) this.barrels.push(new Barrel(x, y));
+      aliveBarrels++;
+    }
   }
   spawnProjectile(opts){ this.projectiles.push(new Projectile(opts)); }
   spawnEnemyProjectile(x,y,vx,vy,d,c){ spawnEP(x,y,vx,vy,d,c); }
@@ -2078,8 +2934,64 @@ class Game {
       document.getElementById('startBtn').textContent = 'JOGAR NOVAMENTE';
     }, 1500);
   }
+  generateShopItems(){
+    const all = [
+      { label:'Curar 50 HP', cost:15, color:'#ff66bb', apply:p => p.hp = Math.min(p.maxHp, p.hp + 50) },
+      { label:'Recarga Total', cost:25, color:'#44ddff', apply:p => { for(const w of p.weapons) if(w && !w.unlimited) w.ammo = w.maxAmmo; } },
+      { label:'+25 HP Máximo', cost:30, color:'#ff8888', apply:p => { p.maxHp += 25; p.hp += 25; } },
+      { label:'+15% Velocidade', cost:35, color:'#88ff88', apply:p => p.speed *= 1.15 },
+      { label:'+15% Dano', cost:40, color:'#ff8800', apply:p => p.damageMultiplier *= 1.15 },
+      { label:'+1 Carga Dash', cost:35, color:'#88aaff', apply:p => { if(p.dashChargesMax<6){ p.dashChargesMax++; p.dashCharges++; } } },
+      { label:'+10% Crítico', cost:30, color:'#ffff44', apply:p => p.critChance = Math.min(0.7, p.critChance + 0.1) },
+      { label:'Arma Aleatória', cost:20, color:'#aaccff', apply:p => { const idx = rndi(1, NUM_SLOTS-1); if(!p.weapons[idx]) p.weapons[idx] = new WEAPON_CLASSES[idx](); else if(!p.weapons[idx].unlimited) p.weapons[idx].refill(); } },
+    ];
+    const picked = [];
+    const pool = [...all];
+    while(picked.length < 4 && pool.length > 0){
+      const i = Math.floor(Math.random()*pool.length);
+      picked.push(pool.splice(i,1)[0]);
+    }
+    return picked;
+  }
+  buyShopItem(idx){
+    if(!this.shopOpen) return;
+    const item = this.shopItems[idx];
+    if(!item || item.bought) return;
+    if(this.player.coins < item.cost) return;
+    this.player.coins -= item.cost;
+    item.apply(this.player);
+    item.bought = true;
+    spawnDamage(this.player.x, this.player.y - 40, '✓ '+item.label, item.color);
+    for(let i=0;i<15;i++){
+      const a = Math.random()*TAU;
+      this.particles.spawn({
+        x:this.player.x, y:this.player.y, vx:Math.cos(a)*150, vy:Math.sin(a)*150,
+        life:0.5, size:rnd(2,5), color:item.color, glow:true
+      });
+    }
+  }
+  pickLevelUp(idx){
+    if(!this.levelUpOpen) return;
+    const opt = this.levelUpOptions[idx];
+    if(!opt) return;
+    opt.apply(this.player);
+    this.levelUpOpen = false;
+    spawnDamage(this.player.x, this.player.y - 50, '✓ '+opt.label, opt.color);
+    game.flashScreen = 0.15;
+    for(let i=0;i<25;i++){
+      const a = Math.random()*TAU;
+      this.particles.spawn({
+        x:this.player.x, y:this.player.y, vx:Math.cos(a)*rnd(100,250), vy:Math.sin(a)*rnd(100,250),
+        life:0.7, size:rnd(3,6), color:opt.color, glow:true
+      });
+    }
+  }
   update(dt){
     if(this.gameOverState) return;
+    // Pause game updates while level-up open
+    if(this.levelUpOpen) return;
+    // Apply slow-mo
+    if(this.slowMo > 0){ dt *= 0.4; this.slowMo -= dt; }
     this.player.update(dt);
     this.camera.follow(this.player);
     this.particles.update(dt);
@@ -2095,13 +3007,15 @@ class Game {
       for(const e of this.enemies){
         if(!e.alive) continue;
         if(dist2(p.x,p.y,e.x,e.y) < (e.r+p.size)*(e.r+p.size)){
-          e.hurt(p.dmg, p.weapon==='sniper'?'#00ffff':(p.weapon==='flame'?'#ff8800':'#fff'));
+          const { dmg, crit } = this.player.rollDamage(p.dmg);
+          let dmgColor = p.weapon==='sniper'?'#00ffff':(p.weapon==='flame'?'#ff8800':'#fff');
+          if(crit) dmgColor = '#ffff00';
+          e.hurt(dmg, dmgColor);
           if(p.burns) e.burning = 3;
           if(p.weapon === 'rocket'){
-            this.explode(p.x, p.y, 80, p.dmg);
+            this.explode(p.x, p.y, 80, dmg);
             p.alive = false;
           } else if(p.pierce){
-            // Sniper pierces
             this.hitSpark(p.x, p.y, p.color);
           } else {
             this.hitSpark(p.x, p.y, p.color);
@@ -2119,24 +3033,60 @@ class Game {
       if(!e.alive){
         this.enemies.splice(i,1);
         const r = Math.random();
-        if(r < 0.08){
-          // Weapon drop (skip Punch idx 0)
+        if(r < 0.06){
           const idx = rndi(1, NUM_SLOTS-1);
           this.drops.push(new WeaponDrop(e.x, e.y, idx));
-        } else if(r < 0.20){
-          // Health drop with weighted random amount
+        } else if(r < 0.18){
           this.drops.push(new HealthDrop(e.x, e.y));
         }
-        // Tank/Boss extra health drop
         if(e instanceof Tank && Math.random() < 0.5){
           this.drops.push(new HealthDrop(e.x+rnd(-20,20), e.y+rnd(-20,20), 30));
         }
         if(e instanceof Boss){
           this.drops.push(new HealthDrop(e.x, e.y, 50));
-          // Boss drops a random weapon refill
           this.drops.push(new WeaponDrop(e.x+30, e.y, rndi(1, NUM_SLOTS-1)));
+          // Boss drops big coins
+          for(let i=0;i<15;i++){
+            this.coins.push(new Coin(e.x+rnd(-30,30), e.y+rnd(-30,30), 2));
+          }
+        }
+        if(e instanceof MiniBossAssassin || e instanceof MiniBossGiantExploder){
+          this.drops.push(new HealthDrop(e.x, e.y, 30));
+          this.drops.push(new WeaponDrop(e.x, e.y, rndi(1, NUM_SLOTS-1)));
+          for(let i=0;i<8;i++){
+            this.coins.push(new Coin(e.x+rnd(-20,20), e.y+rnd(-20,20), 2));
+          }
         }
       }
+    }
+
+    // Obstacles (clean up dead)
+    for(let i=this.obstacles.length-1;i>=0;i--){
+      const o = this.obstacles[i];
+      if(o.update) o.update(dt);
+      if(!o.alive) this.obstacles.splice(i,1);
+    }
+
+    // Barrels
+    for(let i=this.barrels.length-1;i>=0;i--){
+      const b = this.barrels[i];
+      b.update(dt);
+      if(!b.alive){
+        this.barrels.splice(i,1);
+        // Small loot from barrel
+        for(let j=0;j<rndi(1,3);j++){
+          this.coins.push(new Coin(b.x+rnd(-10,10), b.y+rnd(-10,10), 1));
+        }
+      }
+    }
+
+    // Danger zones
+    for(const dz of this.dangerZones) dz.update(dt);
+
+    // Coins
+    for(let i=this.coins.length-1;i>=0;i--){
+      this.coins[i].update(dt);
+      if(!this.coins[i].alive) this.coins.splice(i,1);
     }
 
     // Drops
@@ -2149,19 +3099,25 @@ class Game {
     // Wave logic
     if(this.waveState === 'active' && this.enemies.length === 0){
       this.waveState = 'complete';
-      this.waveT = 5;
+      this.waveT = 8;
       this.waveText = `ONDA ${this.wave} COMPLETA`;
-      // Heal a little
-      this.player.hp = Math.min(this.player.maxHp, this.player.hp + 25);
-      // Drop a guaranteed weapon (skip Punch idx 0)
+      this.player.hp = Math.min(this.player.maxHp, this.player.hp + 20);
       const idx = rndi(1, NUM_SLOTS-1);
       this.drops.push(new WeaponDrop(this.player.x + rnd(-100,100), this.player.y + rnd(-100,100), idx));
-      // Guaranteed health drop too
       this.drops.push(new HealthDrop(this.player.x + rnd(-100,100), this.player.y + rnd(-100,100), 30));
+      // Bonus coins for clearing
+      for(let i=0;i<6;i++){
+        this.coins.push(new Coin(this.player.x+rnd(-80,80), this.player.y+rnd(-80,80), 1));
+      }
+      // Open shop
+      this.shopItems = this.generateShopItems();
+      this.shopOpen = true;
+      this.slowMo = 0.6;
     }
-    if(this.waveState === 'complete'){
+    if(this.waveState === 'complete' && !this.levelUpOpen){
       this.waveT -= dt;
       if(this.waveT <= 0){
+        this.shopOpen = false;
         this.startWave(this.wave + 1);
       }
     }
@@ -2180,8 +3136,14 @@ class Game {
     }
     drawFloor(this.camera);
     drawBlood(this.camera);
+    // Danger zones (drawn on the floor)
+    for(const dz of this.dangerZones) dz.draw(this.camera);
     // Obstacles
     for(const o of this.obstacles) o.draw(this.camera);
+    // Barrels
+    for(const b of this.barrels) b.draw(this.camera);
+    // Coins
+    for(const c of this.coins) c.draw(this.camera);
     // Drops
     for(const d of this.drops) d.draw(this.camera);
     // Enemies
@@ -2201,6 +3163,16 @@ class Game {
     // Damage numbers
     drawDamage(this.camera);
     ctx.restore();
+    // Darkness event overlay (after world, before HUD)
+    if(this.eventWave === 'escuridao' && this.waveState === 'active'){
+      const ps = { x: this.player.x - this.camera.x, y: this.player.y - this.camera.y };
+      const grad = ctx.createRadialGradient(ps.x, ps.y, 60, ps.x, ps.y, 280);
+      grad.addColorStop(0, 'rgba(0,0,0,0)');
+      grad.addColorStop(0.5, 'rgba(0,0,0,0.55)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.95)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+    }
     // Screen flash
     if(this.flashScreen > 0){
       ctx.fillStyle = `rgba(255,255,255,${clamp(this.flashScreen*5,0,0.7)})`;
@@ -2208,6 +3180,12 @@ class Game {
     }
     // HUD
     this.drawHUD();
+    // Minimap additions: barrels and danger zones
+    this.drawMinimapExtras();
+    // Shop / level-up overlays (these handle their own click areas)
+    this.uiClickAreas = [];
+    if(this.levelUpOpen) this.drawLevelUpOverlay();
+    else if(this.shopOpen) this.drawShopOverlay();
   }
   drawHUD(){
     // HP bar
@@ -2389,22 +3367,214 @@ class Game {
     ctx.fillStyle = '#22dd22';
     ctx.fillRect(mmX + this.player.x*scale - 2, mmY + this.player.y*scale - 2, 4, 4);
 
-    // Dash CD indicator
-    if(this.player.dashCD > 0){
+    // Dash stamina indicator (3+ charges)
+    const p = this.player;
+    ctx.font = 'bold 10px Courier New';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('DASH (SHIFT)', 15, 67);
+    const chargeW = 30, chargeH = 10, chargeGap = 4;
+    for(let i=0;i<p.dashChargesMax;i++){
+      const cx = 15 + i*(chargeW+chargeGap);
+      const cy = 70;
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(15, 55, 120, 14);
-      ctx.fillStyle = '#88aaff';
-      ctx.fillRect(17, 57, 116*(1 - this.player.dashCD/1.5), 10);
-      ctx.font = '10px Courier New';
-      ctx.fillStyle = '#fff';
-      ctx.fillText('DASH (SHIFT)', 20, 67);
-    } else {
-      ctx.fillStyle = 'rgba(80,120,200,0.6)';
-      ctx.fillRect(15, 55, 120, 14);
-      ctx.font = 'bold 10px Courier New';
-      ctx.fillStyle = '#fff';
-      ctx.fillText('DASH READY (SHIFT)', 20, 67);
+      ctx.fillRect(cx, cy, chargeW, chargeH);
+      if(i < p.dashCharges){
+        ctx.fillStyle = '#88ccff';
+        ctx.fillRect(cx+1, cy+1, chargeW-2, chargeH-2);
+      } else if(i === p.dashCharges){
+        // Currently regenerating
+        const fillT = 1 - p.dashRegenT/p.dashRegenTime;
+        ctx.fillStyle = '#446688';
+        ctx.fillRect(cx+1, cy+1, (chargeW-2)*fillT, chargeH-2);
+      }
+      ctx.strokeStyle = '#88aaff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx, cy, chargeW, chargeH);
     }
+
+    // Coins + Level + XP
+    const yc = 95;
+    // Coins
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(15, yc, 120, 22);
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.arc(28, yc+11, 7, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 9px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('$', 28, yc+14);
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 14px Courier New';
+    ctx.fillStyle = '#ffd700';
+    ctx.fillText(p.coins, 42, yc+15);
+
+    // Level + XP bar
+    const yl = yc + 28;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(15, yl, 200, 22);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(45, yl+5, 165, 12);
+    const xpr = p.xp / p.xpToNext;
+    ctx.fillStyle = '#aa44ff';
+    ctx.fillRect(45, yl+5, 165*xpr, 12);
+    ctx.shadowBlur = 6; ctx.shadowColor = '#aa44ff';
+    ctx.fillStyle = '#cc66ff';
+    ctx.fillRect(45, yl+5, 165*xpr, 4);
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 14px Courier New';
+    ctx.fillStyle = '#ffd700';
+    ctx.fillText('Lv', 18, yl+15);
+    ctx.fillText(p.level, 32, yl+15);
+    ctx.font = 'bold 10px Courier New';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${Math.floor(p.xp)}/${p.xpToNext}`, 127, yl+15);
+    ctx.textAlign = 'left';
+    // Event wave banner
+    if(this.eventWave && this.waveState === 'active'){
+      const labels = { horda:'⚡ HORDA RÁPIDA', tanques:'⚙ INVASÃO DE TANQUES', escuridao:'☾ ESCURIDÃO' };
+      const colors = { horda:'#ff44aa', tanques:'#ff8800', escuridao:'#7744ff' };
+      ctx.font = 'bold 18px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(W/2 - 160, 70, 320, 26);
+      ctx.fillStyle = colors[this.eventWave];
+      ctx.fillText(labels[this.eventWave], W/2, 89);
+      ctx.textAlign = 'left';
+    }
+  }
+  drawMinimapExtras(){
+    const mmS = 150;
+    const mmX = W - mmS - 15, mmY = H - mmS - 15;
+    const scale = mmS / MAP_W;
+    // Barrels
+    for(const b of this.barrels){
+      if(!b.alive) continue;
+      ctx.fillStyle = '#ff4400';
+      ctx.fillRect(mmX + b.x*scale - 1, mmY + b.y*scale - 1, 3, 3);
+    }
+    // Danger zones
+    for(const dz of this.dangerZones){
+      ctx.fillStyle = dz.type === 'lava' ? 'rgba(255,68,0,0.6)' : 'rgba(136,255,0,0.5)';
+      ctx.beginPath();
+      ctx.arc(mmX + dz.x*scale, mmY + dz.y*scale, dz.r*scale, 0, TAU);
+      ctx.fill();
+      if(dz.loot && !dz.lootCollected){
+        ctx.fillStyle = '#ffd700';
+        ctx.fillRect(mmX + dz.x*scale - 1, mmY + dz.y*scale - 1, 2, 2);
+      }
+    }
+  }
+  drawShopOverlay(){
+    // Semi-transparent backdrop along bottom
+    const cardW = 180, cardH = 160, gap = 16;
+    const totalW = cardW*4 + gap*3;
+    const startX = W/2 - totalW/2;
+    const startY = H/2 - cardH/2 - 20;
+    // Title
+    ctx.font = 'bold 36px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(0,0,0,0.9)';
+    ctx.fillRect(W/2 - 200, startY - 70, 400, 50);
+    ctx.fillStyle = '#ffd700';
+    ctx.fillText('🛒 LOJA', W/2, startY - 35);
+    ctx.font = '14px Courier New';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`Moedas: ${this.player.coins}  ·  Próxima onda em ${Math.ceil(this.waveT)}s`, W/2, startY - 15);
+    // Cards
+    for(let i=0;i<this.shopItems.length;i++){
+      const item = this.shopItems[i];
+      const x = startX + i*(cardW+gap);
+      const y = startY;
+      const canAfford = this.player.coins >= item.cost;
+      const hovered = mouse.x>=x && mouse.x<=x+cardW && mouse.y>=y && mouse.y<=y+cardH;
+      // Card BG
+      ctx.fillStyle = item.bought ? 'rgba(40,40,40,0.95)' : (hovered && canAfford ? 'rgba(40,30,10,0.95)' : 'rgba(20,20,30,0.9)');
+      ctx.fillRect(x, y, cardW, cardH);
+      ctx.strokeStyle = item.bought ? '#444' : (canAfford ? item.color : '#555');
+      ctx.lineWidth = hovered && canAfford && !item.bought ? 4 : 2;
+      ctx.strokeRect(x, y, cardW, cardH);
+      // Item color block (icon area)
+      ctx.fillStyle = item.color + (item.bought ? '44' : 'cc');
+      ctx.fillRect(x + 20, y + 20, cardW - 40, 50);
+      // Label
+      ctx.font = 'bold 14px Courier New';
+      ctx.fillStyle = item.bought ? '#666' : '#fff';
+      ctx.fillText(item.label, x + cardW/2, y + 95);
+      // Cost or BOUGHT
+      ctx.font = 'bold 18px Courier New';
+      if(item.bought){
+        ctx.fillStyle = '#666';
+        ctx.fillText('COMPRADO', x + cardW/2, y + 130);
+      } else {
+        ctx.fillStyle = canAfford ? '#ffd700' : '#aa6644';
+        ctx.fillText(`${item.cost} 🪙`, x + cardW/2, y + 130);
+      }
+      // Click area
+      this.uiClickAreas.push({ x, y, w:cardW, h:cardH, action:()=>this.buyShopItem(i), enabled: canAfford && !item.bought });
+    }
+    // Close button (skip)
+    const cbx = W/2 - 80, cby = startY + cardH + 30;
+    const cbHover = mouse.x>=cbx && mouse.x<=cbx+160 && mouse.y>=cby && mouse.y<=cby+36;
+    ctx.fillStyle = cbHover ? '#444' : '#222';
+    ctx.fillRect(cbx, cby, 160, 36);
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 2;
+    ctx.strokeRect(cbx, cby, 160, 36);
+    ctx.font = 'bold 14px Courier New';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('PRÓXIMA ONDA →', W/2, cby + 23);
+    this.uiClickAreas.push({ x:cbx, y:cby, w:160, h:36, action:()=>{ this.waveT = 0; }, enabled:true });
+    ctx.textAlign = 'left';
+  }
+  drawLevelUpOverlay(){
+    // Dim background
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0,0,W,H);
+    // Title
+    ctx.font = 'bold 48px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd700';
+    ctx.shadowBlur = 20; ctx.shadowColor = '#ffd700';
+    ctx.fillText('NÍVEL '+this.player.level+'!', W/2, H/2 - 160);
+    ctx.shadowBlur = 0;
+    ctx.font = '18px Courier New';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Escolha um upgrade', W/2, H/2 - 130);
+    // Cards
+    const cardW = 230, cardH = 200, gap = 20;
+    const totalW = cardW*3 + gap*2;
+    const startX = W/2 - totalW/2;
+    const y = H/2 - 80;
+    for(let i=0;i<this.levelUpOptions.length;i++){
+      const opt = this.levelUpOptions[i];
+      const x = startX + i*(cardW+gap);
+      const hovered = mouse.x>=x && mouse.x<=x+cardW && mouse.y>=y && mouse.y<=y+cardH;
+      ctx.fillStyle = hovered ? 'rgba(50,40,20,0.97)' : 'rgba(20,20,30,0.95)';
+      ctx.fillRect(x, y, cardW, cardH);
+      ctx.strokeStyle = opt.color;
+      ctx.lineWidth = hovered ? 5 : 3;
+      ctx.strokeRect(x, y, cardW, cardH);
+      // Color icon block
+      const grad = ctx.createLinearGradient(x, y+20, x, y+90);
+      grad.addColorStop(0, opt.color);
+      grad.addColorStop(1, opt.color + '44');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x + 30, y + 30, cardW - 60, 60);
+      // Label
+      ctx.font = 'bold 18px Courier New';
+      ctx.fillStyle = opt.color;
+      ctx.shadowBlur = hovered ? 8 : 0; ctx.shadowColor = opt.color;
+      ctx.fillText(opt.label, x + cardW/2, y + 125);
+      ctx.shadowBlur = 0;
+      ctx.font = '13px Courier New';
+      ctx.fillStyle = '#ccc';
+      ctx.fillText(opt.desc, x + cardW/2, y + 150);
+      ctx.font = 'bold 12px Courier New';
+      ctx.fillStyle = '#888';
+      ctx.fillText(`Tecla ${i+1}`, x + cardW/2, y + 180);
+      this.uiClickAreas.push({ x, y, w:cardW, h:cardH, action:()=>this.pickLevelUp(i), enabled:true });
+    }
+    ctx.textAlign = 'left';
   }
 }
 
@@ -2424,6 +3594,20 @@ function loop(t){
       // Adjust for zoom-centered transform
       mouse.wx = (mouse.x - W/2)/game.camera.zoom + W/2 + game.camera.x;
       mouse.wy = (mouse.y - H/2)/game.camera.zoom + H/2 + game.camera.y;
+    }
+    // Handle UI clicks BEFORE game update (so they don't fire weapons)
+    if(mouse.pressed && (game.shopOpen || game.levelUpOpen)){
+      for(const area of game.uiClickAreas){
+        if(area.enabled && mouse.x>=area.x && mouse.x<=area.x+area.w && mouse.y>=area.y && mouse.y<=area.y+area.h){
+          area.action();
+          mouse.pressed = false;
+          mouse.down = false;
+          break;
+        }
+      }
+      // Consume click even if missed UI to avoid firing
+      mouse.pressed = false;
+      mouse.down = false;
     }
     game.update(dt);
     game.draw();
