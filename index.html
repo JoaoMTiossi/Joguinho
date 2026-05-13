@@ -21,8 +21,9 @@
 <div id="overlay">
   <h1>JOGUINHO — TOP-DOWN ARENA</h1>
   <p><span class="key">WASD</span> mover · <span class="key">Mouse</span> mirar · <span class="key">Clique</span> atirar</p>
-  <p><span class="key">1-8</span> trocar arma · <span class="key">Espaço</span> especial · <span class="key">Shift</span> dash</p>
-  <p style="color:#888;margin-top:10px">Sobreviva às ondas. Pegue armas dropadas. Derrote os bosses.</p>
+  <p><span class="key">1-9</span> trocar arma · <span class="key">Espaço</span> especial · <span class="key">Shift</span> dash</p>
+  <p style="color:#888;margin-top:10px">Sobreviva às ondas. Pegue armas e curas dropadas. Derrote os bosses.</p>
+  <p style="color:#888;font-size:14px">Soco e Katana têm munição infinita · Pegue a mesma arma de novo para recarregar</p>
   <button id="startBtn">INICIAR</button>
 </div>
 <script>
@@ -49,7 +50,7 @@ const ang = (ax,ay,bx,by)=>Math.atan2(by-ay,bx-ax);
 // Input
 const keys = {};
 const mouse = { x:0, y:0, wx:0, wy:0, down:false, pressed:false };
-window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(['1','2','3','4','5','6','7','8'].includes(e.key)) game?.player?.switchWeapon(parseInt(e.key)-1); if(e.key===' '){ game?.player?.useSpecial(); e.preventDefault(); }});
+window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(['1','2','3','4','5','6','7','8','9'].includes(e.key)) game?.player?.switchWeapon(parseInt(e.key)-1); if(e.key===' '){ game?.player?.useSpecial(); e.preventDefault(); }});
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 canvas.addEventListener('mousemove', e=>{ mouse.x = e.clientX; mouse.y = e.clientY; });
 canvas.addEventListener('mousedown', e=>{ mouse.down = true; mouse.pressed = true; });
@@ -155,7 +156,8 @@ class Camera {
 // ============================================================
 const damageNumbers = [];
 function spawnDamage(x,y,amount,color='#fff'){
-  damageNumbers.push({ x, y, vy:-60, life:1, amount:Math.round(amount), color });
+  const text = typeof amount === 'string' ? amount : Math.round(amount);
+  damageNumbers.push({ x, y, vy:-60, life:1, amount:text, color });
 }
 function updateDamage(dt){
   for(let i=damageNumbers.length-1;i>=0;i--){
@@ -274,12 +276,21 @@ class Weapon {
     this.specialCD = 8; this.specialT = 0;
     this.damage = 10;
     this.auto = true;
+    this.unlimited = false;
+    this.maxAmmo = 100;
+    this.ammo = 100;
+    this.refillAmount = 30;
   }
   update(dt){
     if(this.cooldown > 0) this.cooldown -= dt;
     if(this.specialT > 0) this.specialT -= dt;
   }
-  canFire(){ return this.cooldown <= 0; }
+  canFire(){ return this.cooldown <= 0 && (this.unlimited || this.ammo > 0); }
+  consumeAmmo(){ if(!this.unlimited) this.ammo = Math.max(0, this.ammo - 1); }
+  refill(){
+    if(this.unlimited) return;
+    this.ammo = Math.min(this.maxAmmo, this.ammo + this.refillAmount);
+  }
   fire(player, tx, ty){ this.cooldown = this.fireRate; }
   drawHand(ctx, player, aimAng){
     ctx.fillStyle = '#222';
@@ -288,11 +299,79 @@ class Weapon {
   special(player){ if(this.specialT <= 0) this.specialT = this.specialCD; }
 }
 
+class Punch extends Weapon {
+  constructor(){
+    super('Soco', '#ffcc99');
+    this.fireRate = 0.35; this.damage = 22; this.specialCD = 5;
+    this.unlimited = true;
+  }
+  fire(player, tx, ty){
+    if(!this.canFire()) return;
+    this.cooldown = this.fireRate;
+    const a = ang(player.x, player.y, tx, ty);
+    player.punchAnim = { ang: a, t: 0.18, max: 0.18 };
+    let hit = false;
+    for(const e of game.enemies){
+      if(!e.alive) continue;
+      const d = dist(player.x, player.y, e.x, e.y);
+      if(d < 55){
+        const ea = ang(player.x, player.y, e.x, e.y);
+        let diff = ea - a;
+        while(diff > Math.PI) diff -= TAU;
+        while(diff < -Math.PI) diff += TAU;
+        if(Math.abs(diff) < Math.PI*0.4){
+          e.hurt(this.damage, '#ffe0aa');
+          e.x += Math.cos(a)*25;
+          e.y += Math.sin(a)*25;
+          hit = true;
+          for(let i=0;i<6;i++){
+            game.particles.spawn({
+              x:e.x, y:e.y, vx:rnd(-180,180), vy:rnd(-180,180),
+              life:0.4, size:rnd(3,5), color:'#ffaa66', glow:true
+            });
+          }
+        }
+      }
+    }
+    if(hit) game.camera.doShake(2);
+  }
+  drawHand(ctx){
+    ctx.fillStyle = '#3d5d3d';
+    ctx.fillRect(2,-3,8,6);
+    ctx.fillStyle = '#c8956c';
+    ctx.beginPath(); ctx.arc(14, 0, 5, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#8a6244'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  special(player){
+    if(this.specialT > 0) return;
+    this.specialT = this.specialCD;
+    player.shockwave = { r:0, max:160, life:0.5, dmg:this.damage*2 };
+    game.camera.doShake(10);
+    for(const e of game.enemies){
+      if(!e.alive) continue;
+      const d = dist(player.x, player.y, e.x, e.y);
+      if(d < 160){
+        const a = ang(player.x, player.y, e.x, e.y);
+        e.hurt(this.damage*2, '#fff');
+        e.x += Math.cos(a)*70;
+        e.y += Math.sin(a)*70;
+        for(let i=0;i<8;i++){
+          game.particles.spawn({
+            x:e.x, y:e.y, vx:rnd(-250,250), vy:rnd(-250,250),
+            life:0.5, size:rnd(3,6), color:'#ffaa66', glow:true
+          });
+        }
+      }
+    }
+  }
+}
+
 class Pistol extends Weapon {
-  constructor(){ super('Pistola', '#ffe066'); this.fireRate=0.25; this.damage=14; this.specialCD=4; }
+  constructor(){ super('Pistola', '#ffe066'); this.fireRate=0.25; this.damage=14; this.specialCD=4; this.maxAmmo=120; this.ammo=120; this.refillAmount=40; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     const a = ang(player.x, player.y, tx, ty);
     game.spawnProjectile({ x:player.x+Math.cos(a)*20, y:player.y+Math.sin(a)*20, vx:Math.cos(a)*700, vy:Math.sin(a)*700, dmg:this.damage, color:'#ffe066', size:4, weapon:'pistol', trail:true, life:1 });
     game.muzzleFlash(player.x+Math.cos(a)*24, player.y+Math.sin(a)*24, '#ffe066', 8);
@@ -317,10 +396,11 @@ class Pistol extends Weapon {
 }
 
 class MachineGun extends Weapon {
-  constructor(){ super('Metralhadora', '#ff8c00'); this.fireRate=0.08; this.damage=8; this.specialCD=10; }
+  constructor(){ super('Metralhadora', '#ff8c00'); this.fireRate=0.08; this.damage=8; this.specialCD=10; this.maxAmmo=300; this.ammo=300; this.refillAmount=100; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     const a = ang(player.x, player.y, tx, ty) + rnd(-0.08, 0.08);
     game.spawnProjectile({ x:player.x+Math.cos(a)*22, y:player.y+Math.sin(a)*22, vx:Math.cos(a)*900, vy:Math.sin(a)*900, dmg:this.damage, color:'#ff8c00', size:3, weapon:'mg', elongated:true, life:0.6 });
     game.muzzleFlash(player.x+Math.cos(a)*26, player.y+Math.sin(a)*26, '#ffd066', 10);
@@ -339,10 +419,11 @@ class MachineGun extends Weapon {
 }
 
 class Shotgun extends Weapon {
-  constructor(){ super('Shotgun', '#dddddd'); this.fireRate=0.7; this.damage=9; this.specialCD=6; }
+  constructor(){ super('Shotgun', '#dddddd'); this.fireRate=0.7; this.damage=9; this.specialCD=6; this.maxAmmo=30; this.ammo=30; this.refillAmount=12; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     const a = ang(player.x, player.y, tx, ty);
     for(let i=0;i<6;i++){
       const aa = a + rnd(-0.25, 0.25);
@@ -375,10 +456,11 @@ class Shotgun extends Weapon {
 }
 
 class Sniper extends Weapon {
-  constructor(){ super('Sniper', '#00ffff'); this.fireRate=1.0; this.damage=80; this.specialCD=12; this.charging=0; }
+  constructor(){ super('Sniper', '#00ffff'); this.fireRate=1.0; this.damage=80; this.specialCD=12; this.charging=0; this.maxAmmo=15; this.ammo=15; this.refillAmount=6; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     const a = ang(player.x, player.y, tx, ty);
     game.spawnProjectile({ x:player.x+Math.cos(a)*22, y:player.y+Math.sin(a)*22, vx:Math.cos(a)*1500, vy:Math.sin(a)*1500, dmg:this.damage, color:'#00ffff', size:4, weapon:'sniper', pierce:true, life:0.8 });
     game.muzzleFlash(player.x+Math.cos(a)*28, player.y+Math.sin(a)*28, '#00ffff', 14);
@@ -417,10 +499,11 @@ class Sniper extends Weapon {
 }
 
 class Flamethrower extends Weapon {
-  constructor(){ super('Lança-Chamas', '#ff4500'); this.fireRate=0.02; this.damage=2.5; this.specialCD=10; }
+  constructor(){ super('Lança-Chamas', '#ff4500'); this.fireRate=0.02; this.damage=2.5; this.specialCD=10; this.maxAmmo=400; this.ammo=400; this.refillAmount=150; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     const a = ang(player.x, player.y, tx, ty);
     for(let i=0;i<3;i++){
       const aa = a + rnd(-0.3, 0.3);
@@ -449,7 +532,7 @@ class Flamethrower extends Weapon {
 }
 
 class Katana extends Weapon {
-  constructor(){ super('Katana', '#00aaff'); this.fireRate=0.35; this.damage=40; this.specialCD=5; this.swing=0; }
+  constructor(){ super('Katana', '#00aaff'); this.fireRate=0.35; this.damage=40; this.specialCD=5; this.swing=0; this.unlimited=true; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
@@ -507,10 +590,11 @@ class Katana extends Weapon {
 }
 
 class Bazooka extends Weapon {
-  constructor(){ super('Bazuca', '#5a7c4a'); this.fireRate=1.2; this.damage=60; this.specialCD=15; }
+  constructor(){ super('Bazuca', '#5a7c4a'); this.fireRate=1.2; this.damage=60; this.specialCD=15; this.maxAmmo=8; this.ammo=8; this.refillAmount=3; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     const a = ang(player.x, player.y, tx, ty);
     game.spawnProjectile({ x:player.x+Math.cos(a)*24, y:player.y+Math.sin(a)*24, vx:Math.cos(a)*500, vy:Math.sin(a)*500, dmg:this.damage, color:'#5a7c4a', size:8, weapon:'rocket', life:3, rotates:true, ang:a });
     game.camera.doShake(5);
@@ -535,10 +619,11 @@ class Bazooka extends Weapon {
 }
 
 class Laser extends Weapon {
-  constructor(){ super('Laser', '#00ff88'); this.fireRate=0.05; this.damage=1.5; this.specialCD=12; this.heat=0; }
+  constructor(){ super('Laser', '#00ff88'); this.fireRate=0.05; this.damage=1.5; this.specialCD=12; this.heat=0; this.maxAmmo=300; this.ammo=300; this.refillAmount=100; }
   fire(player,tx,ty){
     if(!this.canFire()) return;
     this.cooldown = this.fireRate;
+    this.consumeAmmo();
     this.heat = Math.min(1, this.heat + 0.03);
     // Beam is drawn directly, hit detection here
     const a = ang(player.x, player.y, tx, ty);
@@ -577,7 +662,8 @@ class Laser extends Weapon {
   }
 }
 
-const WEAPON_CLASSES = [Pistol, MachineGun, Shotgun, Sniper, Flamethrower, Katana, Bazooka, Laser];
+const WEAPON_CLASSES = [Punch, Pistol, MachineGun, Shotgun, Sniper, Flamethrower, Katana, Bazooka, Laser];
+const NUM_SLOTS = 9;
 
 // ============================================================
 // PROJECTILES
@@ -680,6 +766,50 @@ class Enemy {
     this.alive=true;this.dmg=10;this.scoreVal=10;
     this.color='#fff';this.bobT=Math.random()*TAU;
     this.hitFlash=0;this.attackCD=0;this.burning=0;
+    this.lastX = x; this.lastY = y;
+    this.stuckT = 0;
+    this.tangentSign = Math.random()<0.5 ? 1 : -1;
+    this.repathT = 0;
+  }
+  // Steering: obstacle avoidance + tangent escape
+  applyAvoidance(vx, vy){
+    const safePad = 30;
+    let ax = 0, ay = 0;
+    for(const o of game.obstacles){
+      const cx = clamp(this.x, o.x, o.x+o.w);
+      const cy = clamp(this.y, o.y, o.y+o.h);
+      const d = dist(this.x, this.y, cx, cy);
+      const safeR = this.r + safePad;
+      if(d < safeR){
+        const dd = Math.max(d, 0.5);
+        const ra = ang(cx, cy, this.x, this.y);
+        const force = (safeR - dd) / safeR;
+        ax += Math.cos(ra)*force*this.speed*2.2;
+        ay += Math.sin(ra)*force*this.speed*2.2;
+        // Tangent component to slide around the obstacle
+        const ta = ra + this.tangentSign*Math.PI*0.5;
+        ax += Math.cos(ta)*force*this.speed*1.0;
+        ay += Math.sin(ta)*force*this.speed*1.0;
+      }
+    }
+    vx += ax; vy += ay;
+    const mag = Math.hypot(vx, vy);
+    if(mag > this.speed){ vx = vx/mag*this.speed; vy = vy/mag*this.speed; }
+    return [vx, vy];
+  }
+  // Detect stuck and flip tangent direction
+  checkStuck(dt){
+    const moved = dist(this.x, this.y, this.lastX, this.lastY);
+    if(moved < this.speed*dt*0.3){
+      this.stuckT += dt;
+      if(this.stuckT > 0.4){
+        this.tangentSign = -this.tangentSign;
+        this.stuckT = 0;
+      }
+    } else {
+      this.stuckT = Math.max(0, this.stuckT - dt*0.5);
+    }
+    this.lastX = this.x; this.lastY = this.y;
   }
   hurt(d, color){
     this.hp -= d;
@@ -717,26 +847,36 @@ class Enemy {
     if(this.hitFlash > 0) this.hitFlash -= dt;
     this.bobT += dt*4;
     this.ai(dt);
-    this.x += this.vx*dt; this.y += this.vy*dt;
-    // Obstacle collision
+    // Move on X and Y separately so collision on one axis doesn't freeze the other
+    const stepX = this.vx*dt, stepY = this.vy*dt;
+    this.x += stepX;
     for(const o of game.obstacles){
       if(o.collides(this.x, this.y, this.r)){
-        const cx = clamp(this.x, o.x, o.x+o.w);
-        const cy = clamp(this.y, o.y, o.y+o.h);
-        const a = ang(cx, cy, this.x, this.y);
-        this.x = cx + Math.cos(a)*this.r;
-        this.y = cy + Math.sin(a)*this.r;
+        if(stepX > 0) this.x = o.x - this.r - 0.1;
+        else if(stepX < 0) this.x = o.x + o.w + this.r + 0.1;
+      }
+    }
+    this.y += stepY;
+    for(const o of game.obstacles){
+      if(o.collides(this.x, this.y, this.r)){
+        if(stepY > 0) this.y = o.y - this.r - 0.1;
+        else if(stepY < 0) this.y = o.y + o.h + this.r + 0.1;
       }
     }
     this.x = clamp(this.x, this.r, MAP_W-this.r);
     this.y = clamp(this.y, this.r, MAP_H-this.r);
+    this.checkStuck(dt);
     if(this.attackCD > 0) this.attackCD -= dt;
   }
   ai(dt){
     const p = game.player;
     const a = ang(this.x, this.y, p.x, p.y);
-    this.vx = Math.cos(a)*this.speed;
-    this.vy = Math.sin(a)*this.speed;
+    let vx = Math.cos(a)*this.speed;
+    let vy = Math.sin(a)*this.speed;
+    [vx, vy] = this.applyAvoidance(vx, vy);
+    // Smooth velocity to avoid jitter
+    this.vx = lerp(this.vx, vx, 0.25);
+    this.vy = lerp(this.vy, vy, 0.25);
     if(dist(this.x,this.y,p.x,p.y) < this.r + p.r && this.attackCD <= 0){
       p.hurt(this.dmg);
       this.attackCD = 1;
@@ -847,15 +987,20 @@ class Shooter extends Enemy {
     const p = game.player;
     const d = dist(this.x,this.y,p.x,p.y);
     const a = ang(this.x, this.y, p.x, p.y);
+    let tvx, tvy;
     if(d > 300){
-      this.vx = Math.cos(a)*this.speed;
-      this.vy = Math.sin(a)*this.speed;
+      tvx = Math.cos(a)*this.speed;
+      tvy = Math.sin(a)*this.speed;
     } else if(d < 200){
-      this.vx = -Math.cos(a)*this.speed;
-      this.vy = -Math.sin(a)*this.speed;
+      tvx = -Math.cos(a)*this.speed;
+      tvy = -Math.sin(a)*this.speed;
     } else {
-      this.vx *= 0.9; this.vy *= 0.9;
+      tvx = Math.cos(a + Math.PI*0.5*this.tangentSign)*this.speed*0.5;
+      tvy = Math.sin(a + Math.PI*0.5*this.tangentSign)*this.speed*0.5;
     }
+    [tvx, tvy] = this.applyAvoidance(tvx, tvy);
+    this.vx = lerp(this.vx, tvx, 0.2);
+    this.vy = lerp(this.vy, tvy, 0.2);
     if(this.shootCD <= 0 && d < 500){
       this.shootCD = 1.8;
       this.recoil = 0.2;
@@ -1015,8 +1160,10 @@ class Swarm extends Enemy {
     if(n > 0){ ax += nx/n*0.6; ay += ny/n*0.6; }
     const mag = Math.hypot(ax,ay);
     if(mag > 0){ ax/=mag; ay/=mag; }
-    this.vx = ax*this.speed;
-    this.vy = ay*this.speed;
+    let tvx = ax*this.speed, tvy = ay*this.speed;
+    [tvx, tvy] = this.applyAvoidance(tvx, tvy);
+    this.vx = lerp(this.vx, tvx, 0.3);
+    this.vy = lerp(this.vy, tvy, 0.3);
     if(dist(this.x,this.y,p.x,p.y) < this.r + p.r && this.attackCD <= 0){
       p.hurt(this.dmg);
       this.attackCD = 0.5;
@@ -1170,8 +1317,29 @@ class WeaponDrop {
     this.t += dt;
     if(dist(this.x, this.y, game.player.x, game.player.y) < 28){
       const idx = this.idx;
-      game.player.weapons[idx] = new WEAPON_CLASSES[idx]();
-      game.player.switchWeapon(idx);
+      const existing = game.player.weapons[idx];
+      if(!existing){
+        game.player.weapons[idx] = new WEAPON_CLASSES[idx]();
+        game.player.switchWeapon(idx);
+        spawnDamage(game.player.x, game.player.y - game.player.r - 10, this.name.toUpperCase(), this.color);
+      } else {
+        if(existing.unlimited){
+          spawnDamage(game.player.x, game.player.y - game.player.r - 10, '∞', this.color);
+        } else {
+          const before = existing.ammo;
+          existing.refill();
+          const gained = existing.ammo - before;
+          spawnDamage(game.player.x, game.player.y - game.player.r - 10, '+'+gained+' ammo', this.color);
+        }
+      }
+      // Pickup particles
+      for(let i=0;i<10;i++){
+        const a = Math.random()*TAU;
+        game.particles.spawn({
+          x:this.x, y:this.y, vx:Math.cos(a)*120, vy:Math.sin(a)*120,
+          life:0.5, size:rnd(2,4), color:this.color, glow:true
+        });
+      }
       this.alive = false;
     }
   }
@@ -1226,6 +1394,84 @@ class WeaponDrop {
 }
 
 // ============================================================
+// HEALTH DROPS (20/30/50% of max HP)
+// ============================================================
+class HealthDrop {
+  constructor(x,y, amount=null){
+    this.x=x;this.y=y;
+    if(amount === null){
+      const r = Math.random();
+      this.amount = r < 0.6 ? 20 : (r < 0.9 ? 30 : 50);
+    } else this.amount = amount;
+    this.color = this.amount === 50 ? '#ff66bb' : (this.amount === 30 ? '#66ff88' : '#aaffaa');
+    this.glowColor = this.amount === 50 ? '#ff66bb' : (this.amount === 30 ? '#33ff55' : '#88ee88');
+    this.t = 0;
+    this.alive = true;
+  }
+  update(dt){
+    this.t += dt;
+    if(dist(this.x, this.y, game.player.x, game.player.y) < 28){
+      const heal = Math.round(game.player.maxHp * (this.amount/100));
+      const before = game.player.hp;
+      game.player.hp = Math.min(game.player.maxHp, game.player.hp + heal);
+      const gained = Math.round(game.player.hp - before);
+      spawnDamage(game.player.x, game.player.y - game.player.r - 10, '+'+gained+' HP', '#22ff44');
+      for(let i=0;i<18;i++){
+        const a = Math.random()*TAU;
+        game.particles.spawn({
+          x:this.x, y:this.y, vx:Math.cos(a)*rnd(80,180), vy:Math.sin(a)*rnd(80,180),
+          life:rnd(0.4,0.8), size:rnd(3,6), color:this.color, glow:true
+        });
+      }
+      // Hearts floating up
+      for(let i=0;i<5;i++){
+        game.particles.spawn({
+          x:game.player.x+rnd(-10,10), y:game.player.y, vx:rnd(-30,30), vy:rnd(-120,-60),
+          life:0.8, size:5, color:'#ff5577', glow:true
+        });
+      }
+      this.alive = false;
+    }
+  }
+  draw(cam){
+    const sx = this.x-cam.x, sy = this.y-cam.y;
+    const scale = 1 + Math.sin(this.t*4)*0.18;
+    // Rotating aura
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(-this.t*2);
+    const grad = ctx.createRadialGradient(0,0,4,0,0,24);
+    grad.addColorStop(0, this.glowColor+'aa');
+    grad.addColorStop(1, this.glowColor+'00');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(0,0,24,0,TAU); ctx.fill();
+    ctx.restore();
+    // Cross icon
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.scale(scale, scale);
+    ctx.shadowBlur = 14; ctx.shadowColor = this.glowColor;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(-3,-11,6,22);
+    ctx.fillRect(-11,-3,22,6);
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(-3,-11,6,22);
+    ctx.strokeRect(-11,-3,22,6);
+    ctx.restore();
+    // Amount label
+    ctx.font = 'bold 12px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#000';
+    ctx.fillText(`+${this.amount}%`, sx+1, sy-20+1);
+    ctx.fillStyle = this.color;
+    ctx.fillText(`+${this.amount}%`, sx, sy-20);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ============================================================
 // PLAYER
 // ============================================================
 class Player {
@@ -1235,8 +1481,8 @@ class Player {
     this.r = 14;
     this.hp = this.maxHp = 100;
     this.speed = 240;
-    this.weapons = [new Pistol(), null, null, null, null, null, null, null];
-    this.weaponIdx = 0;
+    this.weapons = [new Punch(), new Pistol(), null, null, null, null, null, null, null];
+    this.weaponIdx = 1;
     this.aimAng = 0;
     this.walkT = 0;
     this.invuln = 0;
@@ -1249,12 +1495,25 @@ class Player {
     this.laserBeam = null;
     this.rotLaser = null;
     this.sniperCharge = 0;
+    this.punchAnim = null;
+    this.shockwave = null;
   }
   get weapon(){ return this.weapons[this.weaponIdx]; }
   switchWeapon(idx){
-    if(idx < 0 || idx >= 8) return;
+    if(idx < 0 || idx >= NUM_SLOTS) return;
     if(!this.weapons[idx]) return;
     this.weaponIdx = idx;
+  }
+  autoSwitchIfEmpty(){
+    const w = this.weapon;
+    if(!w) return;
+    if(w.unlimited || w.ammo > 0) return;
+    // Find any weapon with ammo, prefer Pistol then Punch
+    for(let i=1;i<NUM_SLOTS;i++){
+      const ww = this.weapons[i];
+      if(ww && (ww.unlimited || ww.ammo > 0)){ this.weaponIdx = i; return; }
+    }
+    if(this.weapons[0]) this.weaponIdx = 0;
   }
   hurt(d){
     if(this.invuln > 0) return;
@@ -1337,6 +1596,20 @@ class Player {
     if(mouse.down || mouse.pressed){
       this.weapon.fire(this, mouse.wx, mouse.wy);
       mouse.pressed = false;
+      this.autoSwitchIfEmpty();
+    }
+
+    // Punch swing anim
+    if(this.punchAnim){
+      this.punchAnim.t -= dt;
+      if(this.punchAnim.t <= 0) this.punchAnim = null;
+    }
+    // Shockwave (punch special)
+    if(this.shockwave){
+      this.shockwave.life -= dt;
+      const t = 1 - this.shockwave.life/0.5;
+      this.shockwave.r = lerp(0, this.shockwave.max, Math.min(1, t));
+      if(this.shockwave.life <= 0) this.shockwave = null;
     }
 
     // Spin 360 special (MG)
@@ -1458,6 +1731,21 @@ class Player {
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.beginPath(); ctx.ellipse(sx, sy+10, 14, 5, 0, 0, TAU); ctx.fill();
 
+    // Shockwave ring (punch special)
+    if(this.shockwave){
+      ctx.save();
+      ctx.strokeStyle = '#ffcc99';
+      ctx.lineWidth = 6;
+      ctx.shadowBlur = 18; ctx.shadowColor = '#ffaa66';
+      ctx.globalAlpha = clamp(this.shockwave.life/0.5, 0, 1);
+      ctx.beginPath(); ctx.arc(sx, sy, this.shockwave.r, 0, TAU); ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath(); ctx.arc(sx, sy, this.shockwave.r, 0, TAU); ctx.stroke();
+      ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
     // Sniper charge effect
     if(this.sniperCharge > 0){
       this.sniperCharge -= 0.016;
@@ -1547,6 +1835,35 @@ class Player {
     ctx.beginPath();
     ctx.moveTo(10,-2); ctx.lineTo(13,0); ctx.lineTo(10,2); ctx.fill();
     ctx.restore();
+
+    // Punch animation (fist extends)
+    if(this.punchAnim){
+      const pt = 1 - this.punchAnim.t/this.punchAnim.max;
+      const ext = Math.sin(pt*Math.PI)*22;
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(this.punchAnim.ang);
+      // Arm
+      ctx.fillStyle = '#3d5d3d';
+      ctx.fillRect(0,-3,12+ext*0.5,6);
+      // Fist
+      ctx.fillStyle = '#c8956c';
+      ctx.beginPath(); ctx.arc(14+ext, 0, 7, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#8a6244'; ctx.lineWidth = 1.5; ctx.stroke();
+      // Impact lines
+      if(pt > 0.3 && pt < 0.85){
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        for(let i=-1;i<=1;i++){
+          if(i===0) continue;
+          ctx.beginPath();
+          ctx.moveTo(20+ext, i*4);
+          ctx.lineTo(30+ext, i*8);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
 
     // Katana swing arc
     if(this.swing){
@@ -1801,10 +2118,23 @@ class Game {
       e.update(dt);
       if(!e.alive){
         this.enemies.splice(i,1);
-        // Random weapon drop chance
-        if(Math.random() < 0.06){
-          const idx = rndi(0,7);
+        const r = Math.random();
+        if(r < 0.08){
+          // Weapon drop (skip Punch idx 0)
+          const idx = rndi(1, NUM_SLOTS-1);
           this.drops.push(new WeaponDrop(e.x, e.y, idx));
+        } else if(r < 0.20){
+          // Health drop with weighted random amount
+          this.drops.push(new HealthDrop(e.x, e.y));
+        }
+        // Tank/Boss extra health drop
+        if(e instanceof Tank && Math.random() < 0.5){
+          this.drops.push(new HealthDrop(e.x+rnd(-20,20), e.y+rnd(-20,20), 30));
+        }
+        if(e instanceof Boss){
+          this.drops.push(new HealthDrop(e.x, e.y, 50));
+          // Boss drops a random weapon refill
+          this.drops.push(new WeaponDrop(e.x+30, e.y, rndi(1, NUM_SLOTS-1)));
         }
       }
     }
@@ -1823,9 +2153,11 @@ class Game {
       this.waveText = `ONDA ${this.wave} COMPLETA`;
       // Heal a little
       this.player.hp = Math.min(this.player.maxHp, this.player.hp + 25);
-      // Drop a guaranteed weapon
-      const idx = rndi(0,7);
+      // Drop a guaranteed weapon (skip Punch idx 0)
+      const idx = rndi(1, NUM_SLOTS-1);
       this.drops.push(new WeaponDrop(this.player.x + rnd(-100,100), this.player.y + rnd(-100,100), idx));
+      // Guaranteed health drop too
+      this.drops.push(new HealthDrop(this.player.x + rnd(-100,100), this.player.y + rnd(-100,100), 30));
     }
     if(this.waveState === 'complete'){
       this.waveT -= dt;
@@ -1922,36 +2254,73 @@ class Game {
     // Weapon bar bottom center
     const w = this.player.weapon;
     if(w){
-      const bx = W/2 - 100, by = H - 70;
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(bx, by, 200, 50);
+      const bx = W/2 - 110, by = H - 78;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(bx, by, 220, 60);
       ctx.strokeStyle = w.color;
       ctx.lineWidth = 2;
-      ctx.strokeRect(bx, by, 200, 50);
-      ctx.font = 'bold 16px Courier New';
+      ctx.strokeRect(bx, by, 220, 60);
+      // Name
+      ctx.font = 'bold 15px Courier New';
       ctx.fillStyle = w.color;
       ctx.textAlign = 'center';
-      ctx.fillText(w.name.toUpperCase(), W/2, by+22);
+      ctx.fillText(w.name.toUpperCase(), W/2+15, by+20);
+      // Ammo
+      ctx.font = 'bold 13px Courier New';
+      if(w.unlimited){
+        ctx.fillStyle = '#ffd700';
+        ctx.fillText('∞ MUNIÇÃO', W/2+15, by+40);
+      } else {
+        const empty = w.ammo === 0;
+        ctx.fillStyle = empty ? '#ff4444' : (w.ammo < w.maxAmmo*0.25 ? '#ffaa00' : '#fff');
+        ctx.fillText(`${w.ammo}/${w.maxAmmo}`, W/2+15, by+40);
+      }
+      // Ammo bar mini
+      if(!w.unlimited){
+        ctx.fillStyle = '#222';
+        ctx.fillRect(bx+60, by+45, 140, 6);
+        ctx.fillStyle = w.color;
+        ctx.fillRect(bx+60, by+45, 140 * (w.ammo/w.maxAmmo), 6);
+      }
       // Special cooldown arc
       const cr = w.specialT/w.specialCD;
       ctx.beginPath();
-      ctx.arc(bx + 30, by + 25, 18, -Math.PI/2, -Math.PI/2 + TAU*(1-cr));
+      ctx.arc(bx + 25, by + 30, 18, -Math.PI/2, -Math.PI/2 + TAU*(1-cr));
       ctx.strokeStyle = w.color;
       ctx.lineWidth = 4;
       ctx.stroke();
-      ctx.font = 'bold 12px Courier New';
+      ctx.font = 'bold 11px Courier New';
       ctx.fillStyle = w.specialT <= 0 ? '#ffd700' : '#888';
-      ctx.fillText('ESP', bx+30, by+29);
+      ctx.fillText('ESP', bx+25, by+34);
       ctx.textAlign = 'left';
-      // Weapon slots
-      ctx.font = '11px Courier New';
-      for(let i=0;i<8;i++){
+      // Weapon slots (9)
+      ctx.font = 'bold 10px Courier New';
+      for(let i=0;i<NUM_SLOTS;i++){
         const slot = this.player.weapons[i];
-        const sx = bx + 210 + i*22;
-        ctx.fillStyle = slot ? (i===this.player.weaponIdx?'#ffd700':'#444') : '#222';
-        ctx.fillRect(sx, by+10, 20, 30);
-        ctx.fillStyle = slot ? (i===this.player.weaponIdx?'#000':'#aaa') : '#444';
-        ctx.fillText(i+1, sx+7, by+30);
+        const sx = bx + 232 + i*22;
+        const active = i===this.player.weaponIdx;
+        ctx.fillStyle = slot ? (active?'#ffd700':'#444') : '#1a1a2a';
+        ctx.fillRect(sx, by+10, 20, 40);
+        if(slot){
+          ctx.fillStyle = active?'#000':slot.color;
+          ctx.fillText(i+1, sx+7, by+22);
+          // Ammo mini
+          ctx.font = '8px Courier New';
+          ctx.fillStyle = active?'#000':'#aaa';
+          if(slot.unlimited) ctx.fillText('∞', sx+7, by+34);
+          else ctx.fillText(slot.ammo, sx+10-(''+slot.ammo).length*2, by+34);
+          if(!slot.unlimited){
+            // Mini ammo bar
+            ctx.fillStyle = active?'#000':'#333';
+            ctx.fillRect(sx+2, by+44, 16, 3);
+            ctx.fillStyle = slot.color;
+            ctx.fillRect(sx+2, by+44, 16*(slot.ammo/slot.maxAmmo), 3);
+          }
+          ctx.font = 'bold 10px Courier New';
+        } else {
+          ctx.fillStyle = '#333';
+          ctx.fillText(i+1, sx+7, by+30);
+        }
       }
     }
 
