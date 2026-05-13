@@ -67,6 +67,13 @@ canvas.addEventListener('mousemove', e=>{ mouse.x = e.clientX; mouse.y = e.clien
 canvas.addEventListener('mousedown', e=>{ mouse.down = true; mouse.pressed = true; });
 canvas.addEventListener('mouseup', e=>{ mouse.down = false; });
 canvas.addEventListener('contextmenu', e=>e.preventDefault());
+canvas.addEventListener('wheel', e=>{
+  e.preventDefault();
+  if(!game || !game.player) return;
+  if(game.levelUpOpen || game.gameOverState) return;
+  const dir = e.deltaY > 0 ? 1 : -1;
+  game.player.cycleWeapon(dir);
+}, { passive:false });
 
 // ============================================================
 // PARTICLE SYSTEM (object pool)
@@ -2200,6 +2207,14 @@ class Player {
     if(idx < 0 || idx >= NUM_SLOTS) return;
     if(!this.weapons[idx]) return;
     this.weaponIdx = idx;
+  }
+  cycleWeapon(dir){
+    // dir: +1 next, -1 previous; skip empty slots
+    let idx = this.weaponIdx;
+    for(let i=0;i<NUM_SLOTS;i++){
+      idx = (idx + dir + NUM_SLOTS) % NUM_SLOTS;
+      if(this.weapons[idx]){ this.weaponIdx = idx; return; }
+    }
   }
   autoSwitchIfEmpty(){
     const w = this.weapon;
