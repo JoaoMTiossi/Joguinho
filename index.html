@@ -6,7 +6,7 @@
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Courier New',monospace;color:#fff;user-select:none}
-  #game{display:block;cursor:crosshair;image-rendering:pixelated}
+  #game{display:block;cursor:none;image-rendering:pixelated}
   #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:rgba(0,0,0,.85);z-index:10;text-align:center;padding:20px}
   #overlay h1{font-size:48px;color:#ffd700;margin-bottom:10px;text-shadow:0 0 20px #ffd700}
   #overlay p{font-size:18px;margin:6px 0;color:#ccc}
@@ -46,6 +46,21 @@ const lerp = (a,b,t)=>a+(b-a)*t;
 const dist2 = (ax,ay,bx,by)=>{const dx=ax-bx,dy=ay-by;return dx*dx+dy*dy};
 const dist = (ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
 const ang = (ax,ay,bx,by)=>Math.atan2(by-ay,bx-ax);
+// Deterministic hash for per-tile decoration (stable across frames)
+const hash2 = (x,y)=>{
+  let h = (x*374761393 + y*668265263) | 0;
+  h = ((h ^ (h >> 13)) * 1274126177) | 0;
+  return ((h ^ (h >> 16)) >>> 0) / 4294967295;
+};
+function roundRect(c, x, y, w, h, r){
+  c.beginPath();
+  c.moveTo(x+r, y);
+  c.arcTo(x+w, y, x+w, y+h, r);
+  c.arcTo(x+w, y+h, x, y+h, r);
+  c.arcTo(x, y+h, x, y, r);
+  c.arcTo(x, y, x+w, y, r);
+  c.closePath();
+}
 
 // Input
 const keys = {};
@@ -617,9 +632,42 @@ function drawFloor(cam){
   const sy0 = Math.floor(cam.y/TILE)*TILE;
   for(let x=sx0; x<cam.x+W+TILE; x+=TILE){
     for(let y=sy0; y<cam.y+H+TILE; y+=TILE){
-      const i = ((x/TILE) + (y/TILE)) & 1;
-      ctx.fillStyle = i ? '#0d0d1a' : '#111122';
+      const tx = x/TILE, ty = y/TILE;
+      const i = (tx + ty) & 1;
+      const h = hash2(tx, ty);
+      // Base tile with slight per-tile tone variation
+      const v = Math.floor(h*6);
+      ctx.fillStyle = i ? `rgb(${13+v},${13+v},${26+v})` : `rgb(${17+v},${17+v},${34+v})`;
       ctx.fillRect(x-cam.x, y-cam.y, TILE, TILE);
+      // Deterministic decorations (sparse)
+      const px = x-cam.x, py = y-cam.y;
+      if(h > 0.93){
+        // Crack
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        const cx = px + 10 + h*30, cy = py + 8 + (h*7%1)*40;
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + 14, cy + 9);
+        ctx.lineTo(cx + 8, cy + 22);
+        ctx.stroke();
+      } else if(h > 0.86){
+        // Pebbles
+        ctx.fillStyle = 'rgba(255,255,255,0.04)';
+        ctx.beginPath(); ctx.arc(px + 16 + h*20, py + 40, 3, 0, TAU); ctx.fill();
+        ctx.beginPath(); ctx.arc(px + 38, py + 18 + h*14, 2, 0, TAU); ctx.fill();
+      } else if(h < 0.05){
+        // Moss / stain patch
+        ctx.fillStyle = 'rgba(40,70,50,0.12)';
+        ctx.beginPath(); ctx.ellipse(px + 32, py + 32, 18 + h*200, 12, h*6, 0, TAU); ctx.fill();
+      }
+      // Inner tile bevel (top-left light, bottom-right dark) — subtle depth
+      ctx.fillStyle = 'rgba(255,255,255,0.018)';
+      ctx.fillRect(px, py, TILE, 2);
+      ctx.fillRect(px, py, 2, TILE);
+      ctx.fillStyle = 'rgba(0,0,0,0.10)';
+      ctx.fillRect(px, py+TILE-2, TILE, 2);
+      ctx.fillRect(px+TILE-2, py, 2, TILE);
     }
   }
   ctx.strokeStyle = '#1a1a2e';
@@ -632,10 +680,17 @@ function drawFloor(cam){
     ctx.moveTo(0, y-cam.y); ctx.lineTo(W, y-cam.y);
   }
   ctx.stroke();
-  // Map boundary
-  ctx.strokeStyle = '#2a2a4a';
-  ctx.lineWidth = 4;
+  // Map boundary — glowing wall edge
+  ctx.save();
+  ctx.shadowBlur = 18; ctx.shadowColor = '#4444aa';
+  ctx.strokeStyle = '#3a3a6a';
+  ctx.lineWidth = 6;
   ctx.strokeRect(-cam.x, -cam.y, MAP_W, MAP_H);
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#6666cc';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-cam.x, -cam.y, MAP_W, MAP_H);
+  ctx.restore();
 }
 
 // ============================================================
@@ -3139,6 +3194,16 @@ class Game {
 
     if(this.waveTextT > 0) this.waveTextT -= dt;
     if(this.flashScreen > 0) this.flashScreen -= dt;
+
+    // Ambient floating dust motes around the camera view
+    if(Math.random() < 0.25){
+      this.particles.spawn({
+        x: this.camera.x + rnd(0, W), y: this.camera.y + rnd(0, H),
+        vx: rnd(-12, 12), vy: rnd(-18, -6),
+        life: rnd(2, 4), size: rnd(0.8, 2),
+        color: 'rgba(180,180,220,0.5)', alpha: 0.35, glow: false, shrink: true
+      });
+    }
   }
   draw(){
     ctx.fillStyle = '#000';
@@ -3151,6 +3216,16 @@ class Game {
     }
     drawFloor(this.camera);
     drawBlood(this.camera);
+    // Warm ambient light pool around the player (ground level)
+    {
+      const px = this.player.x - this.camera.x, py = this.player.y - this.camera.y;
+      const lg = ctx.createRadialGradient(px, py, 20, px, py, 220);
+      lg.addColorStop(0, 'rgba(255,240,200,0.10)');
+      lg.addColorStop(0.6, 'rgba(255,230,180,0.04)');
+      lg.addColorStop(1, 'rgba(255,230,180,0)');
+      ctx.fillStyle = lg;
+      ctx.fillRect(px-220, py-220, 440, 440);
+    }
     // Danger zones (drawn on the floor)
     for(const dz of this.dangerZones) dz.draw(this.camera);
     // Obstacles
@@ -3188,6 +3263,26 @@ class Game {
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
     }
+    // Vignette — darkens screen edges for depth
+    {
+      const vg = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.45, W/2, H/2, Math.max(W,H)*0.75);
+      vg.addColorStop(0, 'rgba(0,0,0,0)');
+      vg.addColorStop(1, 'rgba(0,0,10,0.45)');
+      ctx.fillStyle = vg;
+      ctx.fillRect(0,0,W,H);
+    }
+    // Low-HP red pulse at screen edges
+    {
+      const hpr = this.player.hp / this.player.maxHp;
+      if(hpr < 0.35){
+        const pulse = (0.5 + Math.sin(performance.now()/250)*0.5) * (1 - hpr/0.35);
+        const rg = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.35, W/2, H/2, Math.max(W,H)*0.7);
+        rg.addColorStop(0, 'rgba(255,0,0,0)');
+        rg.addColorStop(1, `rgba(180,0,0,${0.35*pulse})`);
+        ctx.fillStyle = rg;
+        ctx.fillRect(0,0,W,H);
+      }
+    }
     // Screen flash
     if(this.flashScreen > 0){
       ctx.fillStyle = `rgba(255,255,255,${clamp(this.flashScreen*5,0,0.7)})`;
@@ -3201,47 +3296,126 @@ class Game {
     this.uiClickAreas = [];
     if(this.levelUpOpen) this.drawLevelUpOverlay();
     else if(this.shopOpen) this.drawShopOverlay();
+    // Custom crosshair (drawn last, above everything)
+    this.drawCrosshair();
+  }
+  drawCrosshair(){
+    const mx = mouse.x, my = mouse.y;
+    const w = this.player.weapon;
+    const col = w ? w.color : '#fff';
+    const t = performance.now()/1000;
+    // Expands while firing, breathes when idle
+    const spread = mouse.down ? 12 : 7 + Math.sin(t*2)*1.5;
+    ctx.save();
+    ctx.translate(mx, my);
+    if(this.levelUpOpen || this.shopOpen){
+      // Pointer mode for menus
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, TAU); ctx.stroke();
+      ctx.fillStyle = '#ffd700';
+      ctx.beginPath(); ctx.arc(0, 0, 2, 0, TAU); ctx.fill();
+      ctx.restore();
+      return;
+    }
+    ctx.shadowBlur = 6; ctx.shadowColor = col;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    // 4 ticks
+    ctx.beginPath();
+    ctx.moveTo(0, -spread-6); ctx.lineTo(0, -spread);
+    ctx.moveTo(0, spread); ctx.lineTo(0, spread+6);
+    ctx.moveTo(-spread-6, 0); ctx.lineTo(-spread, 0);
+    ctx.moveTo(spread, 0); ctx.lineTo(spread+6, 0);
+    ctx.stroke();
+    // Center dot
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(0, 0, 1.5, 0, TAU); ctx.fill();
+    // Special-ready ring
+    if(w && w.specialT <= 0){
+      ctx.globalAlpha = 0.5 + Math.sin(t*5)*0.3;
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(0, 0, spread+11, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
   }
   drawHUD(){
-    // HP bar
-    ctx.fillStyle = '#000';
-    ctx.fillRect(15, 15, 230, 30);
-    ctx.fillStyle = '#222';
-    ctx.fillRect(18, 18, 224, 24);
+    // HP bar — rounded panel with gradient fill
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    roundRect(ctx, 15, 15, 230, 30, 8); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, 15, 15, 230, 30, 8); ctx.stroke();
     const hpr = this.player.hp / this.player.maxHp;
-    let hpc = '#22dd22';
-    if(hpr < 0.6) hpc = '#dddd22';
-    if(hpr < 0.3) hpc = '#dd2222';
-    ctx.fillStyle = hpc;
-    ctx.fillRect(20, 20, 220*hpr, 20);
-    // Heart icon
-    ctx.fillStyle = '#ff4444';
+    // Inner track
+    ctx.fillStyle = '#1a0a0a';
+    roundRect(ctx, 20, 20, 220, 20, 5); ctx.fill();
+    // Gradient fill green→yellow→red, clipped to current HP
+    if(hpr > 0){
+      ctx.save();
+      roundRect(ctx, 20, 20, 220*hpr, 20, 5); ctx.clip();
+      const hg = ctx.createLinearGradient(20, 0, 240, 0);
+      hg.addColorStop(0, '#dd2222');
+      hg.addColorStop(0.4, '#dddd22');
+      hg.addColorStop(0.75, '#22dd22');
+      ctx.fillStyle = hg;
+      ctx.fillRect(20, 20, 220, 20);
+      // Glass shine on top half
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.fillRect(20, 20, 220, 8);
+      ctx.restore();
+    }
+    // Heart icon (two arcs + point)
+    ctx.save();
+    ctx.shadowBlur = 6; ctx.shadowColor = '#ff4444';
+    ctx.fillStyle = '#ff4455';
     ctx.beginPath();
-    ctx.arc(30, 30, 6, 0, TAU);
+    ctx.arc(27, 28, 4, Math.PI, 0);
+    ctx.arc(35, 28, 4, Math.PI, 0);
+    ctx.lineTo(31, 37);
+    ctx.closePath();
     ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
     ctx.font = 'bold 14px Courier New';
+    ctx.fillStyle = '#000';
+    ctx.fillText(`${Math.ceil(this.player.hp)}/${this.player.maxHp}`, 81, 36);
     ctx.fillStyle = '#fff';
     ctx.fillText(`${Math.ceil(this.player.hp)}/${this.player.maxHp}`, 80, 35);
 
-    // Score - top center
+    // Score - top center (rounded panel)
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    roundRect(ctx, W/2-80, 12, 160, 50, 10); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,215,0,0.35)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, W/2-80, 12, 160, 50, 10); ctx.stroke();
     ctx.font = 'bold 28px Courier New';
     ctx.textAlign = 'center';
     ctx.fillStyle = '#000';
     ctx.fillText(`${this.score}`, W/2+2, 42);
+    ctx.shadowBlur = 8; ctx.shadowColor = '#ffd700';
     ctx.fillStyle = '#ffd700';
     ctx.fillText(`${this.score}`, W/2, 40);
+    ctx.shadowBlur = 0;
     ctx.font = '12px Courier New';
     ctx.fillStyle = '#888';
     ctx.fillText('SCORE', W/2, 55);
 
-    // Wave - top right
+    // Wave - top right (rounded panel)
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    roundRect(ctx, W-150, 12, 135, 50, 10); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    roundRect(ctx, W-150, 12, 135, 50, 10); ctx.stroke();
     ctx.textAlign = 'right';
     ctx.font = 'bold 22px Courier New';
     ctx.fillStyle = '#ffd700';
-    ctx.fillText(`ONDA ${this.wave}`, W-15, 35);
+    ctx.fillText(`ONDA ${this.wave}`, W-25, 35);
     ctx.font = '14px Courier New';
-    ctx.fillStyle = '#fff';
-    ctx.fillText(`☠ ${this.enemies.length}`, W-15, 55);
+    ctx.fillStyle = '#ff6666';
+    ctx.fillText(`☠ ${this.enemies.length}`, W-25, 55);
     ctx.textAlign = 'left';
 
     // Weapon bar bottom center
@@ -3249,10 +3423,13 @@ class Game {
     if(w){
       const bx = W/2 - 110, by = H - 78;
       ctx.fillStyle = 'rgba(0,0,0,0.75)';
-      ctx.fillRect(bx, by, 220, 60);
+      roundRect(ctx, bx, by, 220, 60, 10); ctx.fill();
+      ctx.save();
+      ctx.shadowBlur = w.golden ? 14 : 6; ctx.shadowColor = w.color;
       ctx.strokeStyle = w.color;
       ctx.lineWidth = 2;
-      ctx.strokeRect(bx, by, 220, 60);
+      roundRect(ctx, bx, by, 220, 60, 10); ctx.stroke();
+      ctx.restore();
       // Name
       ctx.font = 'bold 15px Courier New';
       ctx.fillStyle = w.color;
@@ -3339,21 +3516,42 @@ class Game {
       ctx.textAlign = 'left';
     }
 
-    // Wave text
+    // Wave text — pop-in scale + glow
     if(this.waveState === 'complete' || this.waveTextT > 0){
+      const popT = clamp((2 - this.waveTextT)*4, 0, 1);
+      const popScale = this.waveTextT > 0 ? 0.6 + popT*0.4 + Math.sin(popT*Math.PI)*0.08 : 1;
+      ctx.save();
+      ctx.translate(W/2, H/2);
+      ctx.scale(popScale, popScale);
       ctx.font = 'bold 56px Courier New';
       ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(0,0,0,0.8)';
-      ctx.fillText(this.waveText, W/2+3, H/2+3);
+      ctx.fillText(this.waveText, 3, 3);
+      ctx.shadowBlur = 25; ctx.shadowColor = '#ffd700';
       ctx.fillStyle = '#ffd700';
-      ctx.fillText(this.waveText, W/2, H/2);
+      ctx.fillText(this.waveText, 0, 0);
+      ctx.shadowBlur = 0;
+      // Decorative side lines
+      const tw = ctx.measureText(this.waveText).width;
+      ctx.strokeStyle = 'rgba(255,215,0,0.5)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-tw/2 - 70, -18); ctx.lineTo(-tw/2 - 15, -18);
+      ctx.moveTo(tw/2 + 15, -18); ctx.lineTo(tw/2 + 70, -18);
+      ctx.stroke();
+      ctx.restore();
+      ctx.textAlign = 'center';
       if(this.waveState === 'complete'){
-        // Countdown circle
+        // Countdown circle with soft backing disc
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.beginPath(); ctx.arc(W/2, H/2 + 70, 34, 0, TAU); ctx.fill();
         ctx.beginPath();
         ctx.arc(W/2, H/2 + 70, 30, -Math.PI/2, -Math.PI/2 + TAU*(1 - this.waveT/5));
         ctx.strokeStyle = '#ffd700';
+        ctx.shadowBlur = 10; ctx.shadowColor = '#ffd700';
         ctx.lineWidth = 5;
         ctx.stroke();
+        ctx.shadowBlur = 0;
         ctx.font = 'bold 28px Courier New';
         ctx.fillStyle = '#fff';
         ctx.fillText(Math.ceil(this.waveT), W/2, H/2+80);
@@ -3361,26 +3559,41 @@ class Game {
       ctx.textAlign = 'left';
     }
 
-    // Minimap
+    // Minimap — rounded, with player view cone and pulsing boss dots
     const mmS = 150;
     const mmX = W - mmS - 15, mmY = H - mmS - 15;
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(mmX, mmY, mmS, mmS);
-    ctx.strokeStyle = '#444';
+    ctx.fillStyle = 'rgba(5,5,15,0.75)';
+    roundRect(ctx, mmX, mmY, mmS, mmS, 8); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 2;
-    ctx.strokeRect(mmX, mmY, mmS, mmS);
+    roundRect(ctx, mmX, mmY, mmS, mmS, 8); ctx.stroke();
+    ctx.save();
+    roundRect(ctx, mmX, mmY, mmS, mmS, 8); ctx.clip();
     const scale = mmS / MAP_W;
     ctx.fillStyle = '#5a3a2a';
     for(const o of this.obstacles){
       ctx.fillRect(mmX + o.x*scale, mmY + o.y*scale, o.w*scale, o.h*scale);
     }
+    const mmPulse = 0.6 + Math.sin(performance.now()/200)*0.4;
     for(const e of this.enemies){
-      ctx.fillStyle = e instanceof Boss ? '#ff00ff' : '#ff3333';
-      const ms = e instanceof Boss ? 4 : 2;
+      const isBig = e instanceof Boss || e instanceof MiniBossAssassin || e instanceof MiniBossGiantExploder;
+      ctx.fillStyle = e instanceof Boss ? '#ff00ff' : (isBig ? '#ffaa00' : '#ff3333');
+      const ms = isBig ? 3 + mmPulse*3 : 2;
       ctx.fillRect(mmX + e.x*scale - ms/2, mmY + e.y*scale - ms/2, ms, ms);
     }
-    ctx.fillStyle = '#22dd22';
-    ctx.fillRect(mmX + this.player.x*scale - 2, mmY + this.player.y*scale - 2, 4, 4);
+    // Player view-direction cone
+    const pmx = mmX + this.player.x*scale, pmy = mmY + this.player.y*scale;
+    ctx.fillStyle = 'rgba(80,220,80,0.25)';
+    ctx.beginPath();
+    ctx.moveTo(pmx, pmy);
+    ctx.arc(pmx, pmy, 14, this.player.aimAng - 0.5, this.player.aimAng + 0.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 5; ctx.shadowColor = '#22dd22';
+    ctx.fillStyle = '#22ff22';
+    ctx.fillRect(pmx - 2, pmy - 2, 4, 4);
+    ctx.shadowBlur = 0;
+    ctx.restore();
 
     // Dash stamina indicator (3+ charges)
     const p = this.player;
